@@ -12,6 +12,12 @@
 # limitations under the License.
 # ==============================================================================
 
+"""
+This module handles communication patterns for distributed training in the SGLang framework.
+It defines how data is scattered or gathered across different ranks in a distributed setup,
+particularly for attention and MLP layers in transformer models.
+"""
+
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -28,490 +34,576 @@ from sglang.srt.layers.dp_attention import (
     attn_tp_reduce_scatter,
     dp_gather_partial,
     dp_scatter,
+    get_attention_dp_size,
     get_attention_tp_rank,
     get_attention_tp_size,
-    get_local_attention_dp_size,
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 
-class ScatterMode(Enum):
+class DataDistributionMode(Enum):
     """
-    Suppose we have TP=4, DP=2, enable-dp-attention, and the system handles seq a,b,c,d
+    Defines the data distribution modes across ranks in a distributed training setup.
+    - DISTRIBUTED: Data is split across all ranks, each rank has a unique portion.
+    - TP_GROUP_FULL: Data is fully replicated within each tensor parallel attention group.
+    - GLOBAL_FULL: Data is fully replicated across all ranks.
+    
+    Example:
+    Suppose we have TP=4, DP=2, enable-dp-attention, and the system handles sequences a,b,c,d
     Model input/output: [ab, ab, cd, cd] for four ranks respectively
-    SCATTERED: [a, b, c, d]
-    TP_ATTN_FULL: [ab, ab, cd, cd], i.e. all ranks inside a TP attn group have full data of the group
-    FULL: [abcd, abcd, abcd, abcd]
+    - DISTRIBUTED: [a, b, c, d]
+    - TP_GROUP_FULL: [ab, ab, cd, cd], i.e., all ranks inside a TP attention group have full data of the group
+    - GLOBAL_FULL: [abcd, abcd, abcd, abcd]
     """
 
-    SCATTERED = auto()
-    TP_ATTN_FULL = auto()
-    FULL = auto()
+    DISTRIBUTED = auto()
+    TP_GROUP_FULL = auto()
+    GLOBAL_FULL = auto()
 
     @staticmethod
-    def model_input_output():
-        """The scatter mode for model forward pass input and output data"""
-        return ScatterMode.TP_ATTN_FULL
+    def default_model_io_mode():
+        """Returns the distribution mode used for model forward pass input and output data."""
+        return DataDistributionMode.TP_GROUP_FULL
 
 
 @dataclass
-class _LayerModeComputationContext:
-    num_layers: int
-    layer_id: int
-    is_layer_sparse: bool
+class LayerContext:
+    """Context for computing distribution modes for different layers in the model."""
+    total_layers: int
+    current_layer_id: int
+    is_current_layer_sparse: bool
     is_previous_layer_sparse: Optional[bool]
 
-    def previous_layer(self):
+    def get_previous_layer_context(self):
+        """Returns the context for the previous layer."""
         assert self.is_previous_layer_sparse is not None
-        return _LayerModeComputationContext(
-            layer_id=self.layer_id - 1,
-            is_layer_sparse=self.is_previous_layer_sparse,
+        return LayerContext(
+            current_layer_id=self.current_layer_id - 1,
+            is_current_layer_sparse=self.is_previous_layer_sparse,
             is_previous_layer_sparse=None,
-            num_layers=self.num_layers,
+            total_layers=self.total_layers,
         )
 
 
 @dataclass
-class LayerScatterModes:
-    layer_input_mode: ScatterMode
-    attn_mode: ScatterMode
-    # Can be further split into e.g. mlp_input_mode and mlp_output_mode if needed
-    mlp_mode: ScatterMode
-    middle_residual_mode: ScatterMode
-    layer_output_mode: ScatterMode
+class LayerDistributionConfig:
+    """
+    Defines the distribution modes for different components of a transformer layer.
+    This helps in determining how data is distributed or gathered at each stage of the layer computation.
+    """
+    input_distribution: DataDistributionMode
+    attention_distribution: DataDistributionMode
+    mlp_distribution: DataDistributionMode
+    intermediate_residual_distribution: DataDistributionMode
+    output_distribution: DataDistributionMode
 
     @classmethod
-    def init_new(cls, **kwargs):
-        context = _LayerModeComputationContext(**kwargs)
+    def create(cls, **kwargs):
+        """Initializes distribution modes for a layer based on the provided context."""
+        context = LayerContext(**kwargs)
         return cls(
-            layer_input_mode=cls._compute_layer_input_mode(context),
-            attn_mode=ScatterMode.TP_ATTN_FULL,
-            mlp_mode=cls._compute_mlp_mode(context),
-            middle_residual_mode=cls._compute_middle_residual_mode(context),
-            layer_output_mode=cls._compute_layer_output_mode(context),
+            input_distribution=cls._determine_input_distribution(context),
+            attention_distribution=DataDistributionMode.TP_GROUP_FULL,
+            mlp_distribution=cls._determine_mlp_distribution(context),
+            intermediate_residual_distribution=cls._determine_intermediate_residual_distribution(context),
+            output_distribution=cls._determine_output_distribution(context),
         )
 
     @classmethod
-    def _compute_layer_input_mode(cls, context: _LayerModeComputationContext):
-        if context.layer_id == 0:
-            return ScatterMode.model_input_output()
-        return cls._compute_layer_output_mode(context.previous_layer())
+    def _determine_input_distribution(cls, context: LayerContext):
+        """Computes the input distribution mode for the current layer."""
+        if context.current_layer_id == 0:
+            return DataDistributionMode.default_model_io_mode()
+        return cls._determine_output_distribution(context.get_previous_layer_context())
 
     @classmethod
-    def _compute_mlp_mode(cls, context: _LayerModeComputationContext):
-        if context.is_layer_sparse:
+    def _determine_mlp_distribution(cls, context: LayerContext):
+        """Computes the distribution mode for the MLP component of the layer."""
+        if context.is_current_layer_sparse:
             return (
-                ScatterMode.SCATTERED
+                DataDistributionMode.DISTRIBUTED
                 if global_server_args_dict["enable_deepep_moe"]
-                else ScatterMode.FULL
+                else DataDistributionMode.GLOBAL_FULL
             )
         else:
             return (
-                ScatterMode.SCATTERED
-                if enable_moe_dense_fully_dp()
-                else ScatterMode.FULL
+                DataDistributionMode.DISTRIBUTED
+                if is_moe_dense_fully_distributed()
+                else DataDistributionMode.GLOBAL_FULL
             )
 
     @classmethod
-    def _compute_middle_residual_mode(cls, context: _LayerModeComputationContext):
-        mlp_mode = cls._compute_mlp_mode(context)
-        if mlp_mode == ScatterMode.SCATTERED:
-            return ScatterMode.SCATTERED
-        if mlp_mode == ScatterMode.FULL:
-            return ScatterMode.TP_ATTN_FULL
+    def _determine_intermediate_residual_distribution(cls, context: LayerContext):
+        """Computes the distribution mode for the intermediate residual connection."""
+        mlp_dist = cls._determine_mlp_distribution(context)
+        if mlp_dist == DataDistributionMode.DISTRIBUTED:
+            return DataDistributionMode.DISTRIBUTED
+        if mlp_dist == DataDistributionMode.GLOBAL_FULL:
+            return DataDistributionMode.TP_GROUP_FULL
         raise NotImplementedError
 
     @classmethod
-    def _compute_layer_output_mode(cls, context: _LayerModeComputationContext):
-        mlp_mode = cls._compute_mlp_mode(context)
-        if context.layer_id == context.num_layers - 1:
-            return ScatterMode.model_input_output()
-        if mlp_mode == ScatterMode.SCATTERED:
-            return ScatterMode.SCATTERED
-        if mlp_mode == ScatterMode.FULL:
-            return ScatterMode.TP_ATTN_FULL
+    def _determine_output_distribution(cls, context: LayerContext):
+        """Computes the output distribution mode for the current layer."""
+        mlp_dist = cls._determine_mlp_distribution(context)
+        if context.current_layer_id == context.total_layers - 1:
+            return DataDistributionMode.default_model_io_mode()
+        if mlp_dist == DataDistributionMode.DISTRIBUTED:
+            return DataDistributionMode.DISTRIBUTED
+        if mlp_dist == DataDistributionMode.GLOBAL_FULL:
+            return DataDistributionMode.TP_GROUP_FULL
         raise NotImplementedError
 
 
-def enable_moe_dense_fully_dp():
+def is_moe_dense_fully_distributed():
+    """Checks if MoE dense layers should use fully distributed data parallelism."""
     return global_server_args_dict["moe_dense_tp_size"] == 1
 
 
-class LayerCommunicator:
+class LayerDataCommunicator:
+    """
+    Manages communication patterns for a transformer layer, handling data distribution
+    and gathering for attention and MLP components.
+    """
     def __init__(
         self,
-        layer_scatter_modes: LayerScatterModes,
-        input_layernorm: torch.nn.Module,
-        post_attention_layernorm: torch.nn.Module,
+        distribution_config: LayerDistributionConfig,
+        input_normalization: torch.nn.Module,
+        post_attention_normalization: torch.nn.Module,
     ):
-        self.layer_scatter_modes = layer_scatter_modes
-        self.input_layernorm = input_layernorm
-        self.post_attention_layernorm = post_attention_layernorm
+        self.distribution_config = distribution_config
+        self.input_normalization = input_normalization
+        self.post_attention_normalization = post_attention_normalization
 
-        self._context = CommunicateContext.init_new()
-        self._communicate_simple_fn = CommunicateSimpleFn.get_fn(
-            input_mode=self.layer_scatter_modes.layer_input_mode,
-            output_mode=self.layer_scatter_modes.attn_mode,
-            context=self._context,
+        self._comm_context = CommunicationContext.initialize()
+        self._basic_communication_handler = BasicCommunicationHandler.get_handler(
+            source_mode=self.distribution_config.input_distribution,
+            target_mode=self.distribution_config.attention_distribution,
+            context=self._comm_context,
         )
-        self._communicate_with_all_reduce_and_layer_norm_fn = (
-            CommunicateWithAllReduceAndLayerNormFn.get_fn(
-                hidden_states_input_mode=self.layer_scatter_modes.attn_mode,
-                residual_input_mode=self.layer_scatter_modes.layer_input_mode,
-                hidden_states_output_mode=self.layer_scatter_modes.mlp_mode,
-                residual_output_mode=self.layer_scatter_modes.middle_residual_mode,
-                context=self._context,
-            )
+        self._attention_to_mlp_communication_handler = AttentionToMlpCommunicationHandler.get_handler(
+            attention_data_mode=self.distribution_config.attention_distribution,
+            residual_input_mode=self.distribution_config.input_distribution,
+            mlp_data_mode=self.distribution_config.mlp_distribution,
+            residual_output_mode=self.distribution_config.intermediate_residual_distribution,
+            context=self._comm_context,
         )
-        self._communicate_summable_tensor_pair_fn = (
-            CommunicateSummableTensorPairFn.get_fn(
-                hidden_states_input_mode=self.layer_scatter_modes.mlp_mode,
-                residual_input_mode=self.layer_scatter_modes.middle_residual_mode,
-                output_mode=self.layer_scatter_modes.layer_output_mode,
-                context=self._context,
-            )
+        self._layer_output_communication_handler = LayerOutputCommunicationHandler.get_handler(
+            mlp_data_mode=self.distribution_config.mlp_distribution,
+            residual_input_mode=self.distribution_config.intermediate_residual_distribution,
+            target_mode=self.distribution_config.output_distribution,
+            context=self._comm_context,
         )
 
-    def prepare_attn(
+    def prepare_for_attention(
         self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
     ):
-        if hidden_states.shape[0] == 0:
-            residual = hidden_states
+        """
+        Prepares data for the attention computation by applying layer normalization
+        and necessary communication patterns.
+        """
+        if hidden_data.shape[0] == 0:
+            residual_data = hidden_data
         else:
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
+            if residual_data is None:
+                residual_data = hidden_data
+                hidden_data = self.input_normalization(hidden_data)
             else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+                hidden_data, residual_data = self.input_normalization(hidden_data, residual_data)
 
-        hidden_states = self._communicate_simple_fn(
-            hidden_states=hidden_states,
-            forward_batch=forward_batch,
-            context=self._context,
+        hidden_data = self._basic_communication_handler(
+            hidden_data=hidden_data,
+            batch_info=batch_info,
+            context=self._comm_context,
         )
 
-        return hidden_states, residual
+        return hidden_data, residual_data
 
-    def prepare_mlp(
+    def prepare_for_mlp(
         self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
     ):
-        return self._communicate_with_all_reduce_and_layer_norm_fn(
-            hidden_states=hidden_states,
-            residual=residual,
-            forward_batch=forward_batch,
-            layernorm=self.post_attention_layernorm,
-            context=self._context,
+        """
+        Prepares data for the MLP computation by applying communication patterns
+        and layer normalization.
+        """
+        return self._attention_to_mlp_communication_handler(
+            hidden_data=hidden_data,
+            residual_data=residual_data,
+            batch_info=batch_info,
+            normalization_layer=self.post_attention_normalization,
+            context=self._comm_context,
         )
 
-    def postprocess_layer(
+    def finalize_layer_output(
         self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
     ):
-        return self._communicate_summable_tensor_pair_fn(
-            hidden_states=hidden_states,
-            residual=residual,
-            forward_batch=forward_batch,
-            context=self._context,
+        """
+        Post-processes the layer output by applying necessary communication patterns
+        to combine hidden states and residuals.
+        """
+        return self._layer_output_communication_handler(
+            hidden_data=hidden_data,
+            residual_data=residual_data,
+            batch_info=batch_info,
+            context=self._comm_context,
         )
 
 
 @dataclass
-class CommunicateContext:
-    process_group_sizes: Dict["ScatterMode", int]
-    attn_tp_rank: int
-    attn_tp_size: int
-    local_attn_dp_size: int
-    tp_size: int
+class CommunicationContext:
+    """
+    Holds configuration and context information for communication operations
+    in distributed training.
+    """
+    group_sizes: Dict[DataDistributionMode, int]
+    attention_tp_rank: int
+    attention_tp_group_size: int
+    attention_dp_group_size: int
+    tensor_parallel_size: int
 
-    def is_same_group_size(self, a: "ScatterMode", b: "ScatterMode"):
-        return self.process_group_sizes[a] == self.process_group_sizes[b]
+    def has_same_group_size(self, mode_a: DataDistributionMode, mode_b: DataDistributionMode):
+        """Checks if two distribution modes have the same process group size."""
+        return self.group_sizes[mode_a] == self.group_sizes[mode_b]
 
     @classmethod
-    def init_new(cls):
-        attn_tp_rank = get_attention_tp_rank()
-        attn_tp_size = get_attention_tp_size()
-        local_attn_dp_size = get_local_attention_dp_size()
-        tp_size = get_tensor_model_parallel_world_size()
-        process_group_sizes = {
-            ScatterMode.SCATTERED: 1,
-            ScatterMode.TP_ATTN_FULL: attn_tp_size,
-            ScatterMode.FULL: tp_size,
+    def initialize(cls):
+        """Initializes a new communication context with settings from the distributed environment."""
+        attention_tp_rank = get_attention_tp_rank()
+        attention_tp_group_size = get_attention_tp_size()
+        attention_dp_group_size = get_attention_dp_size()
+        tensor_parallel_size = get_tensor_model_parallel_world_size()
+        group_sizes = {
+            DataDistributionMode.DISTRIBUTED: 1,
+            DataDistributionMode.TP_GROUP_FULL: attention_tp_group_size,
+            # TODO: support --moe-dense-tp-size > 1
+            DataDistributionMode.GLOBAL_FULL: tensor_parallel_size,
         }
         return cls(
-            process_group_sizes=process_group_sizes,
-            attn_tp_rank=attn_tp_rank,
-            attn_tp_size=attn_tp_size,
-            local_attn_dp_size=local_attn_dp_size,
-            tp_size=tp_size,
+            group_sizes=group_sizes,
+            attention_tp_rank=attention_tp_rank,
+            attention_tp_group_size=attention_tp_group_size,
+            attention_dp_group_size=attention_dp_group_size,
+            tensor_parallel_size=tensor_parallel_size,
         )
 
 
-class CommunicateSimpleFn:
+class BasicCommunicationHandler:
+    """Handles basic communication operations between different distribution modes."""
+
     @staticmethod
-    def get_fn(
-        input_mode: ScatterMode,
-        output_mode: ScatterMode,
-        context: CommunicateContext,
+    def get_handler(
+        source_mode: DataDistributionMode,
+        target_mode: DataDistributionMode,
+        context: CommunicationContext,
     ):
-        if context.is_same_group_size(input_mode, output_mode):
-            return CommunicateSimpleFn._trivial
+        """Selects the appropriate communication handler based on source and target distribution modes."""
+        if context.has_same_group_size(source_mode, target_mode):
+            return BasicCommunicationHandler._no_op_handler
 
-        if (input_mode == ScatterMode.SCATTERED) and (
-            output_mode == ScatterMode.TP_ATTN_FULL
+        if (source_mode == DataDistributionMode.DISTRIBUTED) and (
+            target_mode == DataDistributionMode.TP_GROUP_FULL
         ):
-            return CommunicateSimpleFn._scattered_to_tp_attn_full
+            return BasicCommunicationHandler._distributed_to_tp_group_full
 
-        raise NotImplementedError(f"{input_mode=} {output_mode=}")
-
-    @staticmethod
-    def _trivial(
-        hidden_states: torch.Tensor,
-        forward_batch: ForwardBatch,
-        context: CommunicateContext,
-    ) -> torch.Tensor:
-        return hidden_states
+        raise NotImplementedError(f"{source_mode=} {target_mode=}")
 
     @staticmethod
-    def _scattered_to_tp_attn_full(
-        hidden_states: torch.Tensor,
-        forward_batch: ForwardBatch,
-        context: CommunicateContext,
+    def _no_op_handler(
+        hidden_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        context: CommunicationContext,
     ) -> torch.Tensor:
-        hidden_states, local_hidden_states = (
-            forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-            hidden_states,
+        """Returns the input tensor unchanged if no communication is needed."""
+        return hidden_data
+
+    @staticmethod
+    def _distributed_to_tp_group_full(
+        hidden_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        context: CommunicationContext,
+    ) -> torch.Tensor:
+        """
+        Gathers distributed data into a full tensor within each tensor parallel attention group.
+        """
+        hidden_data, local_hidden_data = (
+            batch_info.gathered_buffer[: batch_info.input_ids.shape[0]],
+            hidden_data,
         )
         attn_tp_all_gather(
-            list(hidden_states.tensor_split(context.attn_tp_size)),
-            local_hidden_states,
+            list(hidden_data.tensor_split(context.attention_tp_group_size)),
+            local_hidden_data,
         )
-        return hidden_states
+        return hidden_data
 
 
-class CommunicateWithAllReduceAndLayerNormFn:
-    """Besides communication, needs to
-    1. All reduce in tp_attn_group on hidden_states
-    2. Apply layer norm
+class AttentionToMlpCommunicationHandler:
+    """
+    Manages communication operations that involve all-reduce operations
+    and layer normalization for transitioning from attention to MLP layers.
     """
 
     @staticmethod
-    def get_fn(
-        hidden_states_input_mode: ScatterMode,
-        residual_input_mode: ScatterMode,
-        hidden_states_output_mode: ScatterMode,
-        residual_output_mode: ScatterMode,
-        context: CommunicateContext,
+    def get_handler(
+        attention_data_mode: DataDistributionMode,
+        residual_input_mode: DataDistributionMode,
+        mlp_data_mode: DataDistributionMode,
+        residual_output_mode: DataDistributionMode,
+        context: CommunicationContext,
     ):
-
+        """
+        Selects the appropriate handler for communication and layer normalization
+        based on input and output distribution modes.
+        """
         if (
-            context.is_same_group_size(
-                hidden_states_input_mode, hidden_states_output_mode
+            context.has_same_group_size(
+                attention_data_mode, mlp_data_mode
             )
-            and context.is_same_group_size(residual_input_mode, residual_output_mode)
-            and context.attn_tp_size == 1
+            and context.has_same_group_size(residual_input_mode, residual_output_mode)
+            and context.attention_tp_group_size == 1
         ):
-            return CommunicateWithAllReduceAndLayerNormFn._simple
+            return AttentionToMlpCommunicationHandler._basic_normalization_handler
 
         if (
-            (hidden_states_input_mode == ScatterMode.TP_ATTN_FULL)
-            and (residual_input_mode == ScatterMode.TP_ATTN_FULL)
-            and (hidden_states_output_mode == ScatterMode.FULL)
-            and (residual_output_mode == ScatterMode.TP_ATTN_FULL)
-        ):
-            return CommunicateWithAllReduceAndLayerNormFn._gather_hidden_states
-
-        if (
-            (hidden_states_input_mode == ScatterMode.TP_ATTN_FULL)
+            (attention_data_mode == DataDistributionMode.TP_GROUP_FULL)
             and (
-                residual_input_mode in [ScatterMode.SCATTERED, ScatterMode.TP_ATTN_FULL]
+                residual_input_mode in [DataDistributionMode.DISTRIBUTED, DataDistributionMode.TP_GROUP_FULL]
             )
-            and (hidden_states_output_mode == ScatterMode.SCATTERED)
-            and (residual_output_mode == ScatterMode.SCATTERED)
+            and (mlp_data_mode == DataDistributionMode.GLOBAL_FULL)
+            and (residual_output_mode == DataDistributionMode.TP_GROUP_FULL)
         ):
             return partial(
-                CommunicateWithAllReduceAndLayerNormFn._scatter_hidden_states_and_residual,
+                AttentionToMlpCommunicationHandler._gather_attention_and_residual_data,
+                residual_input_mode=residual_input_mode,
+            )
+
+        if (
+            (attention_data_mode == DataDistributionMode.TP_GROUP_FULL)
+            and (
+                residual_input_mode in [DataDistributionMode.DISTRIBUTED, DataDistributionMode.TP_GROUP_FULL]
+            )
+            and (mlp_data_mode == DataDistributionMode.DISTRIBUTED)
+            and (residual_output_mode == DataDistributionMode.DISTRIBUTED)
+        ):
+            return partial(
+                AttentionToMlpCommunicationHandler._distribute_attention_and_residual_data,
                 residual_input_mode=residual_input_mode,
             )
 
         raise NotImplementedError(
-            f"{hidden_states_input_mode=} {residual_input_mode=} {residual_output_mode=} {residual_output_mode=}"
+            f"{attention_data_mode=} {residual_input_mode=} {mlp_data_mode=} {residual_output_mode=}"
         )
 
     @staticmethod
-    def _simple(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
-        layernorm: torch.nn.Module,
-        context: CommunicateContext,
+    def _basic_normalization_handler(
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        normalization_layer: torch.nn.Module,
+        context: CommunicationContext,
     ):
+        """Applies layer normalization without additional communication."""
         # TODO move these `if shape != 0` into LayerNorm itself
-        if hidden_states.shape[0] != 0:
-            hidden_states, residual = layernorm(hidden_states, residual)
-        return hidden_states, residual
+        if hidden_data.shape[0] != 0:
+            hidden_data, residual_data = normalization_layer(hidden_data, residual_data)
+        return hidden_data, residual_data
 
     @staticmethod
-    def _gather_hidden_states(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
-        layernorm: torch.nn.Module,
-        context: CommunicateContext,
-    ):
-        if context.local_attn_dp_size != 1:
-            if context.attn_tp_rank == 0:
-                hidden_states += residual
-            hidden_states, local_hidden_states = (
-                forward_batch.gathered_buffer,
-                hidden_states,
-            )
-            dp_gather_partial(hidden_states, local_hidden_states, forward_batch)
-            dp_scatter(residual, hidden_states, forward_batch)
-            if hidden_states.shape[0] != 0:
-                hidden_states = layernorm(hidden_states)
-        else:
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-            hidden_states, residual = layernorm(hidden_states, residual)
-        return hidden_states, residual
-
-    @staticmethod
-    def _scatter_hidden_states_and_residual(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
-        layernorm: torch.nn.Module,
-        context: CommunicateContext,
+    def _gather_attention_and_residual_data(
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        normalization_layer: torch.nn.Module,
+        context: CommunicationContext,
         *,
         residual_input_mode,
     ):
-        tensor_list = list(hidden_states.tensor_split(context.attn_tp_size))
-        hidden_states = tensor_list[context.attn_tp_rank]
-        attn_tp_reduce_scatter(hidden_states, tensor_list)
-        if residual_input_mode == ScatterMode.TP_ATTN_FULL:
-            residual = residual.tensor_split(context.attn_tp_size)[context.attn_tp_rank]
-        if hidden_states.shape[0] != 0:
-            hidden_states, residual = layernorm(hidden_states, residual)
-        return hidden_states, residual
+        """
+        Gathers hidden data and residuals across ranks, applies layer normalization,
+        and handles data parallelism if enabled.
+        """
+        if residual_input_mode == DataDistributionMode.DISTRIBUTED:
+            residual_data, local_residual_data = (
+                batch_info.gathered_buffer[
+                    : batch_info.input_ids.shape[0]
+                ].clone(),
+                residual_data,
+            )
+            attn_tp_all_gather(
+                list(residual_data.tensor_split(context.attention_tp_group_size)), local_residual_data
+            )
+        if context.attention_dp_group_size != 1:
+            if context.attention_tp_rank == 0:
+                hidden_data += residual_data
+            hidden_data, local_hidden_data = (
+                batch_info.gathered_buffer,
+                hidden_data,
+            )
+            dp_gather_partial(hidden_data, local_hidden_data, batch_info)
+            dp_scatter(residual_data, hidden_data, batch_info)
+            if hidden_data.shape[0] != 0:
+                hidden_data = normalization_layer(hidden_data)
+        else:
+            hidden_data = tensor_model_parallel_all_reduce(hidden_data)
+            hidden_data, residual_data = normalization_layer(hidden_data, residual_data)
+        return hidden_data, residual_data
+
+    @staticmethod
+    def _distribute_attention_and_residual_data(
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        normalization_layer: torch.nn.Module,
+        context: CommunicationContext,
+        *,
+        residual_input_mode,
+    ):
+        """
+        Distributes hidden data and residuals to individual ranks and applies layer normalization.
+        """
+        tensor_segments = list(hidden_data.tensor_split(context.attention_tp_group_size))
+        hidden_data = tensor_segments[context.attention_tp_rank]
+        attn_tp_reduce_scatter(hidden_data, tensor_segments)
+        if residual_input_mode == DataDistributionMode.TP_GROUP_FULL:
+            residual_data = residual_data.tensor_split(context.attention_tp_group_size)[context.attention_tp_rank]
+        if hidden_data.shape[0] != 0:
+            hidden_data, residual_data = normalization_layer(hidden_data, residual_data)
+        return hidden_data, residual_data
 
 
-class CommunicateSummableTensorPairFn:
-    """It is allowed to make (hidden_states, residual) := (hidden_states + residual, None) if needed."""
+class LayerOutputCommunicationHandler:
+    """
+    Handles communication for pairs of tensors (hidden data and residuals)
+    that can be summed if needed during distributed processing at the layer output.
+    """
 
     @classmethod
-    def execute(
+    def execute_handler(
         cls,
-        hidden_states_input_mode,
+        hidden_data_mode,
         residual_input_mode,
-        output_mode,
+        target_mode,
         context,
         **kwargs,
     ):
-        return cls.get_fn(
-            hidden_states_input_mode=hidden_states_input_mode,
+        """Executes the appropriate communication handler for tensor pairs."""
+        return cls.get_handler(
+            hidden_data_mode=hidden_data_mode,
             residual_input_mode=residual_input_mode,
-            output_mode=output_mode,
+            target_mode=target_mode,
             context=context,
         )(context=context, **kwargs)
 
     @staticmethod
-    def get_fn(
-        hidden_states_input_mode: ScatterMode,
-        residual_input_mode: ScatterMode,
-        output_mode: ScatterMode,
-        context: CommunicateContext,
+    def get_handler(
+        hidden_data_mode: DataDistributionMode,
+        residual_input_mode: DataDistributionMode,
+        target_mode: DataDistributionMode,
+        context: CommunicationContext,
     ):
-        if context.is_same_group_size(
-            hidden_states_input_mode, output_mode
-        ) and context.is_same_group_size(residual_input_mode, output_mode):
-            return CommunicateSummableTensorPairFn._trivial
+        """
+        Selects the communication handler for tensor pairs based on input and output distribution modes.
+        """
+        if context.has_same_group_size(
+            hidden_data_mode, target_mode
+        ) and context.has_same_group_size(residual_input_mode, target_mode):
+            return LayerOutputCommunicationHandler._no_op_handler
 
         if (
-            (hidden_states_input_mode == ScatterMode.FULL)
-            and (residual_input_mode == ScatterMode.TP_ATTN_FULL)
-            and (output_mode == ScatterMode.TP_ATTN_FULL)
+            (hidden_data_mode == DataDistributionMode.GLOBAL_FULL)
+            and (residual_input_mode == DataDistributionMode.TP_GROUP_FULL)
+            and (target_mode == DataDistributionMode.TP_GROUP_FULL)
         ):
-            return CommunicateSummableTensorPairFn._scatter_hidden_states
+            return LayerOutputCommunicationHandler._distribute_hidden_data
 
         if (
-            (hidden_states_input_mode == ScatterMode.SCATTERED)
-            and (residual_input_mode == ScatterMode.SCATTERED)
-            and (output_mode == ScatterMode.TP_ATTN_FULL)
+            (hidden_data_mode == DataDistributionMode.DISTRIBUTED)
+            and (residual_input_mode == DataDistributionMode.DISTRIBUTED)
+            and (target_mode == DataDistributionMode.TP_GROUP_FULL)
         ):
-            return CommunicateSummableTensorPairFn._gather
+            return LayerOutputCommunicationHandler._gather_data
 
         if (
-            (hidden_states_input_mode == ScatterMode.TP_ATTN_FULL)
-            and (residual_input_mode == ScatterMode.TP_ATTN_FULL)
-            and (output_mode == ScatterMode.SCATTERED)
+            (hidden_data_mode == DataDistributionMode.TP_GROUP_FULL)
+            and (residual_input_mode == DataDistributionMode.TP_GROUP_FULL)
+            and (target_mode == DataDistributionMode.DISTRIBUTED)
         ):
-            return CommunicateSummableTensorPairFn._scatter
+            return LayerOutputCommunicationHandler._distribute_data
 
         raise NotImplementedError(
-            f"{hidden_states_input_mode=} {residual_input_mode=} {output_mode=}"
+            f"{hidden_data_mode=} {residual_input_mode=} {target_mode=}"
         )
 
     @staticmethod
-    def _trivial(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
-        context: CommunicateContext,
+    def _no_op_handler(
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        context: CommunicationContext,
     ):
-        return hidden_states, residual
+        """Returns the input tensors unchanged if no communication is needed."""
+        return hidden_data, residual_data
 
     @staticmethod
-    def _scatter_hidden_states(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
-        context: CommunicateContext,
+    def _distribute_hidden_data(
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        context: CommunicationContext,
     ):
+        """
+        Distributes hidden data across ranks while keeping residuals unchanged.
+        Note: batch_info.gathered_buffer is used both after distribute and after gather.
+        """
         # TODO(ch-wan): use reduce-scatter in MLP to avoid this scatter
-        # important: forward batch.gathered_buffer is used both after scatter and after gather.
-        # be careful about this!
-        hidden_states, global_hidden_states = (
-            forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-            hidden_states,
+        hidden_data, global_hidden_data = (
+            batch_info.gathered_buffer[: batch_info.input_ids.shape[0]],
+            hidden_data,
         )
-        dp_scatter(hidden_states, global_hidden_states, forward_batch)
-        return hidden_states, residual
+        dp_scatter(hidden_data, global_hidden_data, batch_info)
+        return hidden_data, residual_data
 
     @staticmethod
-    def _gather(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
-        context: CommunicateContext,
+    def _gather_data(
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        context: CommunicationContext,
     ):
-        hidden_states += residual
-        residual = None
-        hidden_states, local_hidden_states = (
-            forward_batch.gathered_buffer[: forward_batch.input_ids.shape[0]],
-            hidden_states,
+        """
+        Gathers distributed hidden data and residuals into a full tensor within
+        each tensor parallel attention group.
+        """
+        hidden_data += residual_data
+        residual_data = None
+        hidden_data, local_hidden_data = (
+            batch_info.gathered_buffer[: batch_info.input_ids.shape[0]],
+            hidden_data,
         )
         attn_tp_all_gather(
-            list(hidden_states.tensor_split(context.attn_tp_size)),
-            local_hidden_states,
+            list(hidden_data.tensor_split(context.attention_tp_group_size)),
+            local_hidden_data,
         )
-        return hidden_states, residual
+        return hidden_data, residual_data
 
     @staticmethod
-    def _scatter(
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        forward_batch: ForwardBatch,
-        context: CommunicateContext,
+    def _distribute_data(
+        hidden_data: torch.Tensor,
+        residual_data: torch.Tensor,
+        batch_info: ForwardBatch,
+        context: CommunicationContext,
     ):
-        assert residual is None, "not yet handled residual!=None"
-        tensor_list = list(hidden_states.tensor_split(context.attn_tp_size))
-        hidden_states = tensor_list[context.attn_tp_rank]
-        return hidden_states, residual
+        """Distributes hidden data to individual ranks, assuming residual is None."""
+        assert residual_data is None, "not yet handled residual_data!=None"
+        tensor_segments = list(hidden_data.tensor_split(context.attention_tp_group_size))
+        hidden_data = tensor_segments[context.attention_tp_rank]
+        return hidden_data, residual_data
