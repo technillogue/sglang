@@ -20,7 +20,7 @@ from typing import Optional, Tuple, Union
 import torch
 
 from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.distributed import get_pp_group, get_tp_group, get_world_group
+from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.hf_transformers_utils import (
     get_processor,
     get_tokenizer,
@@ -147,6 +147,15 @@ class TpModelWorker:
         # A reference make this class has the same member as TpModelWorkerClient
         self.worker = self
 
+        self.hicache_layer_transfer_counter = None
+
+    def register_hicache_layer_transfer_counter(self, counter):
+        self.hicache_layer_transfer_counter = counter
+
+    def set_hicache_consumer(self, consumer_index):
+        if self.hicache_layer_transfer_counter is not None:
+            self.hicache_layer_transfer_counter.set_consumer(consumer_index)
+
     def get_worker_info(self):
         return (
             self.max_total_num_tokens,
@@ -183,8 +192,11 @@ class TpModelWorker:
     def forward_batch_generation(
         self,
         model_worker_batch: ModelWorkerBatch,
+        launch_done: Optional[threading.Event] = None,
         skip_sample: bool = False,
-    ) -> Tuple[Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[
+        Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
+    ]:
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
 
         pp_proxy_tensors = None
@@ -196,11 +208,11 @@ class TpModelWorker:
             )
 
         if self.pp_group.is_last_rank:
-            logits_output = self.model_runner.forward(
+            logits_output, can_run_cuda_graph = self.model_runner.forward(
                 forward_batch, pp_proxy_tensors=pp_proxy_tensors
             )
-            if model_worker_batch.launch_done is not None:
-                model_worker_batch.launch_done.set()
+            if launch_done is not None:
+                launch_done.set()
 
             if skip_sample:
                 next_token_ids = None
@@ -209,17 +221,17 @@ class TpModelWorker:
                     logits_output, model_worker_batch
                 )
 
-            return logits_output, next_token_ids
+            return logits_output, next_token_ids, can_run_cuda_graph
         else:
-            pp_proxy_tensors = self.model_runner.forward(
+            pp_proxy_tensors, can_run_cuda_graph = self.model_runner.forward(
                 forward_batch,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
-            return pp_proxy_tensors.tensors, None
+            return pp_proxy_tensors.tensors, None, can_run_cuda_graph
 
     def forward_batch_embedding(self, model_worker_batch: ModelWorkerBatch):
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
-        logits_output = self.model_runner.forward(forward_batch)
+        logits_output, _ = self.model_runner.forward(forward_batch)
         embeddings = logits_output.embeddings
         return embeddings
 

@@ -9,9 +9,12 @@ import torch
 
 import sglang.srt.sampling.penaltylib as penaltylib
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
+from sglang.srt.sampling.sampling_params import TOP_K_ALL
+from sglang.srt.utils import merge_bias_tensor
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
+
 
 logger = logging.getLogger(__name__)
 
@@ -27,16 +30,17 @@ class SamplingBatchInfo:
     # Whether all requests use greedy sampling
     is_all_greedy: bool
 
+    # Whether any requests use top_p sampling
+    need_top_p_sampling: bool
+
+    # Whether any requests use top_k sampling
+    need_top_k_sampling: bool
+
     # Whether any request needs min_p sampling
     need_min_p_sampling: bool
 
-    # Use thinking_budget to truncate thinking
-    num_thinking_tokens: Optional[torch.Tensor] = None
-    think_end_ids: Optional[torch.Tensor] = None
-    thinking_budgets: Optional[torch.Tensor] = None
-
     # Masking tensors for grammar-guided structured outputs
-    vocab_size: int = 0
+    vocab_size: int
     grammars: Optional[List] = None
     vocab_mask: Optional[torch.Tensor] = None
     apply_mask_func: Optional[Callable[[torch.Tensor, torch.Tensor], None]] = None
@@ -60,6 +64,9 @@ class SamplingBatchInfo:
     # Device
     device: str = "cuda"
 
+    # Handle logit bias
+    logit_bias: Optional[torch.Tensor] = None
+
     @classmethod
     def from_schedule_batch(cls, batch: ScheduleBatch, vocab_size: int):
         reqs = batch.reqs
@@ -81,22 +88,15 @@ class SamplingBatchInfo:
         min_ps = torch.tensor(
             [r.sampling_params.min_p for r in reqs], dtype=torch.float
         ).to(device, non_blocking=True)
-        if any(hasattr(r.tokenizer, "think_end_id") for r in reqs):
-            think_end_ids = torch.tensor(
-                [getattr(r.tokenizer, "think_end_id", -1) for r in reqs],
-                dtype=torch.int64,
-            ).to(device, non_blocking=True)
-            num_thinking_tokens = torch.tensor([0 for _ in reqs], dtype=torch.int64).to(
-                device, non_blocking=True
-            )
-            thinking_budgets = torch.tensor(
-                [r.sampling_params.thinking_budget or -1 for r in reqs],
-                dtype=torch.int64,
-            ).to(device, non_blocking=True)
-        else:
-            think_end_ids = None
-            num_thinking_tokens = None
-            thinking_budgets = None
+
+        logit_bias = None
+        if any(r.sampling_params.logit_bias is not None for r in reqs):
+            logit_bias = torch.zeros(len(reqs), vocab_size, device=device)
+            for i, r in enumerate(reqs):
+                if r.sampling_params.logit_bias is not None:
+                    for key, value in r.sampling_params.logit_bias.items():
+                        logit_bias[i, int(key)] = value
+
         # Check if any request has custom logit processor
         has_custom_logit_processor = (
             batch.enable_custom_logit_processor  # check the flag first.
@@ -152,10 +152,9 @@ class SamplingBatchInfo:
             top_ps=top_ps,
             top_ks=top_ks,
             min_ps=min_ps,
-            think_end_ids=think_end_ids,
-            num_thinking_tokens=num_thinking_tokens,
-            thinking_budgets=thinking_budgets,
             is_all_greedy=all(r.sampling_params.top_k <= 1 for r in reqs),
+            need_top_p_sampling=any(r.sampling_params.top_p != 1.0 for r in reqs),
+            need_top_k_sampling=any(r.sampling_params.top_k != TOP_K_ALL for r in reqs),
             need_min_p_sampling=any(r.sampling_params.min_p > 0 for r in reqs),
             vocab_size=vocab_size,
             penalizer_orchestrator=penalizer_orchestrator,
@@ -163,40 +162,12 @@ class SamplingBatchInfo:
             custom_params=custom_params,
             custom_logit_processor=merged_custom_logit_processor,
             device=device,
+            logit_bias=logit_bias,
         )
         return ret
 
     def __len__(self):
         return len(self.temperatures)
-
-    def apply_thinking_budgets(self, next_token_logits: torch.Tensor):
-        has_budget = self.thinking_budgets > 0
-        if not has_budget.any():
-            return
-        torch.where(
-            has_budget,
-            self.num_thinking_tokens + 1,
-            self.num_thinking_tokens,
-            out=self.num_thinking_tokens,
-        )
-        should_stop = has_budget & (
-            self.num_thinking_tokens - 1 > self.thinking_budgets
-        )
-        next_token_logits.masked_fill_(should_stop.unsqueeze(0), float("-inf"))
-        batch_indices = torch.nonzero(should_stop, as_tuple=True)[0]
-        if len(batch_indices) > 0:
-            end_token_indices = self.think_end_ids[batch_indices]
-            next_token_logits[batch_indices, end_token_indices] = 0.0
-
-    def update_thinking_budgets(self, next_token_ids: torch.Tensor):
-        if not torch.any(self.thinking_budgets > 0):
-            return
-        torch.where(
-            next_token_ids == self.think_end_ids,
-            torch.tensor(-1, device=self.thinking_budgets.device),
-            self.thinking_budgets,
-            out=self.thinking_budgets,
-        )
 
     def update_regex_vocab_mask(self):
         if not self.grammars:
@@ -219,7 +190,7 @@ class SamplingBatchInfo:
 
         # Apply the mask
         for i, grammar in enumerate(self.grammars):
-            if grammar and not grammar.finished:
+            if grammar and not grammar.finished and not grammar.is_terminated():
                 grammar.fill_vocab_mask(self.vocab_mask, i)
 
         # Move the mask to the device if needed
@@ -248,6 +219,9 @@ class SamplingBatchInfo:
         if self.vocab_mask is not None:
             self.apply_mask_func(logits=logits, vocab_mask=self.vocab_mask)
 
+        if self.logit_bias is not None:
+            logits.add_(self.logit_bias)
+
     def filter_batch(self, keep_indices: List[int], keep_indices_device: torch.Tensor):
         self.penalizer_orchestrator.filter(keep_indices_device)
 
@@ -262,6 +236,9 @@ class SamplingBatchInfo:
         ]:
             value = getattr(self, item, None)
             setattr(self, item, value[keep_indices_device])
+
+        if self.logit_bias is not None:
+            self.logit_bias = self.logit_bias[keep_indices_device]
 
     def _filter_batch_custom_logit_processor(
         self, keep_indices: List[int], keep_indices_device: torch.Tensor
@@ -346,7 +323,7 @@ class SamplingBatchInfo:
             # Set the flag to True if any of the two has custom logit processor
             self.has_custom_logit_processor = True
 
-        # Note: becasue the __len()__ operator is defined on the temperatures tensor,
+        # Note: because the __len()__ operator is defined on the temperatures tensor,
         # please make sure any merge operation with len(self) or len(other) is done before
         # the merge operation of the temperatures tensor below.
         for item in [
@@ -359,5 +336,12 @@ class SamplingBatchInfo:
             other_val = getattr(other, item, None)
             setattr(self, item, torch.cat([self_val, other_val]))
 
-        self.is_all_greedy |= other.is_all_greedy
+        self.is_all_greedy &= other.is_all_greedy
+        self.need_top_p_sampling |= other.need_top_p_sampling
+        self.need_top_k_sampling |= other.need_top_k_sampling
         self.need_min_p_sampling |= other.need_min_p_sampling
+
+        # Merge logit bias
+        self.logit_bias = merge_bias_tensor(
+            self.logit_bias, other.logit_bias, len(self), len(other), self.device, 0.0
+        )
