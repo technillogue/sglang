@@ -192,17 +192,17 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "expert_offsets, Tensor workspace) -> ()");
   m.impl("fp8_blockwise_scaled_grouped_mm", torch::kCUDA, &fp8_blockwise_scaled_grouped_mm);
   m.def(
+    "prepare_moe_input(Tensor topk_ids, Tensor expert_offsets, Tensor? blockscale_offsets, Tensor problem_sizes1,"
+      " Tensor problem_sizes2, Tensor input_permutation, Tensor output_permutation, int num_experts, int n, int k) -> "
+      "()");
+  m.impl("prepare_moe_input", torch::kCUDA, &prepare_moe_input);
+  m.def(
     "moe_permute(Tensor input, Tensor topk_ids, Tensor token_expert_indicies, Tensor? expert_map, int n_expert, int n_local_expert, int topk, int align_block_size, Tensor permuted_input, Tensor expert_first_token_offset, Tensor inv_permuted_idx, Tensor permuted_idx, Tensor m_indices) -> ()");
   m.impl("moe_permute", torch::kCUDA, &moe_permute);
 
   m.def(
     "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights, Tensor inv_permuted_idx, Tensor expert_first_token_offset, int topk, Tensor hidden_states) -> ()");
   m.impl("moe_unpermute", torch::kCUDA, &moe_unpermute);
-  m.def("prepare_moe_input(Tensor topk_ids, Tensor expert_offsets, Tensor? blockscale_offsets, Tensor problem_sizes1,"
-      " Tensor problem_sizes2, Tensor input_permutation, Tensor output_permutation, int num_experts, int n, int k) -> "
-      "()");
-  m.impl("prepare_moe_input", torch::kCUDA, &prepare_moe_input);
-
   m.def("shuffle_rows(Tensor input, Tensor dst2src_map, Tensor output) -> ()");
   m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
   m.def("apply_shuffle_mul_sum(Tensor input, Tensor output, Tensor permutation, Tensor? factors) -> ()");
