@@ -3,7 +3,6 @@ from typing import Any, Dict, Optional
 import torch
 from math import prod
 from typing import List, Optional, Tuple
-from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant, per_token_group_quant_fp8
 
 def moe_align_block_size(
     topk_ids,
@@ -332,6 +331,7 @@ def _fp8_quantize(
     Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
+    from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant, per_token_group_quant_fp8
     if block_shape is None:
         A, A_scale = scaled_fp8_quant(A, A_scale)
     else:
@@ -432,7 +432,7 @@ def deep_gemm_moe_fp8(
     """
     # Lazy import to avoid CUDA initialization problems.
     import deep_gemm as dg
-    from sglang.srt.layers.quantization.deep_gemm import grouped_gemm_nt_f8f8bf16_contig
+    from sglang.srt.layers.quantization import deep_gemm_wrapper
 
     assert expert_map is None, "Expert maps not supported yet"
 
@@ -540,7 +540,7 @@ def deep_gemm_moe_fp8(
             workspace2 = _resize_cache(workspace2, (curr_M, N // 2))
             workspace3 = _resize_cache(workspace3, (curr_M, K))
 
-        grouped_gemm_nt_f8f8bf16_contig(
+        deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
             (qcurr_hidden_states, a1q_scale), (w1, w1_scale), workspace1,
             expert_ids)
 
@@ -556,7 +556,7 @@ def deep_gemm_moe_fp8(
         qworkspace2, a2q_scale = _fp8_quantize(workspace2, a2_scale,
                                                block_shape)
 
-        grouped_gemm_nt_f8f8bf16_contig(
+        deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_contig(
             (qworkspace2, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
 
         out_hidden_states[begin_chunk_idx:end_chunk_idx] = \

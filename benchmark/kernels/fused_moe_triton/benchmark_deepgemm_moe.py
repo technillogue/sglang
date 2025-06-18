@@ -1,4 +1,4 @@
-# python3 benchmark/kernels/fused_moe_triton/benchmark_deepgemm_moe.py  --model /DeepSeek-V3 -tp 8 --dtype fp8_w8a8 --use-deep-gemm --trust-remote-code
+# python3 benchmark/kernels/fused_moe_triton/benchmark_deepgemm_moe.py  --model deepseek-ai/DeepSeek-V3-0324 -tp 8 --dtype fp8_w8a8 --use-deep-gemm --trust-remote-code
 import argparse
 from typing import Any, TypedDict
 
@@ -105,7 +105,7 @@ def benchmark_config(config: BenchmarkConfig,
         from sglang.srt.layers.moe.fused_moe_triton import override_config
         with override_config(config):
             if use_deep_gemm:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                topk_weights, topk_ids = fused_topk(
                     x, input_gating, topk, False)
                 deep_gemm_moe_fp8(
                     x,
