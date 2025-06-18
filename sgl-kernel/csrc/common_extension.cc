@@ -192,7 +192,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "expert_offsets, Tensor workspace) -> ()");
   m.impl("fp8_blockwise_scaled_grouped_mm", torch::kCUDA, &fp8_blockwise_scaled_grouped_mm);
   m.def(
-    "prepare_moe_input(Tensor topk_ids, Tensor expert_offsets, Tensor? blockscale_offsets, Tensor problem_sizes1,"
+      "prepare_moe_input(Tensor topk_ids, Tensor expert_offsets, Tensor? blockscale_offsets, Tensor problem_sizes1,"
       " Tensor problem_sizes2, Tensor input_permutation, Tensor output_permutation, int num_experts, int n, int k) -> "
       "()");
   m.impl("prepare_moe_input", torch::kCUDA, &prepare_moe_input);
