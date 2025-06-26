@@ -49,11 +49,20 @@ FetchContent_Declare(
     GIT_SHALLOW    OFF
 )
 FetchContent_Populate(repo-cutlass)
+
 # DeepGEMM
+if("${CUDA_VERSION}" VERSION_EQUAL "12.8")
+  set(DeepGEMM_REPO "https://github.com/sgl-project/DeepGEMM")
+  set(DeepGEMM_TAG "blackwell")
+else()
+  set(DeepGEMM_REPO "https://github.com/deepseek-ai/DeepGEMM")
+  set(DeepGEMM_TAG "8dfa3298274bfe6b242f6f8a3e6f3eff2707dd9f")
+endif()
+
 FetchContent_Declare(
     repo-deepgemm
-    GIT_REPOSITORY https://github.com/deepseek-ai/DeepGEMM
-    GIT_TAG        d75b218b7b8f4a5dd5406ac87905039ead3ae42f
+    GIT_REPOSITORY ${DeepGEMM_REPO}
+    GIT_TAG        ${DeepGEMM_TAG}
     GIT_SHALLOW    OFF
 )
 FetchContent_Populate(repo-deepgemm)
@@ -73,6 +82,14 @@ FetchContent_Declare(
     GIT_SHALLOW    OFF
 )
 FetchContent_Populate(repo-flash-attention)
+# mscclpp
+FetchContent_Declare(
+    repo-mscclpp
+    GIT_REPOSITORY https://github.com/microsoft/mscclpp.git
+    GIT_TAG        51eca89d20f0cfb3764ccd764338d7b22cd486a6
+    GIT_SHALLOW    OFF
+)
+FetchContent_Populate(repo-mscclpp)
 
 # ccache option
 option(ENABLE_CCACHE "Whether to use ccache" ON)
@@ -91,7 +108,6 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
     message(STATUS "For aarch64, disable gencode below SM90 by default")
 endif()
 
-
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/csrc
@@ -99,6 +115,7 @@ include_directories(
     ${repo-cutlass_SOURCE_DIR}/tools/util/include
     ${repo-flashinfer_SOURCE_DIR}/include
     ${repo-flashinfer_SOURCE_DIR}/csrc
+    ${repo-mscclpp_SOURCE_DIR}/include
 )
 
 set(SGL_KERNEL_CUDA_FLAGS
@@ -144,18 +161,14 @@ if (ENABLE_BELOW_SM90)
     )
 endif()
 
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "13.0" OR SGL_KERNEL_ENABLE_SM100A)
-    list(APPEND SGL_KERNEL_CUDA_FLAGS
-        "-gencode=arch=compute_100,code=sm_110"
-        "-gencode=arch=compute_100a,code=sm_110a"
-    )
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR SGL_KERNEL_ENABLE_SM100A)
+if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR SGL_KERNEL_ENABLE_SM100A)
     list(APPEND SGL_KERNEL_CUDA_FLAGS
         "-gencode=arch=compute_100,code=sm_100"
-        "-gencode=arch=compute_100,code=sm_101"
-        "-gencode=arch=compute_100,code=sm_101a"
         "-gencode=arch=compute_100a,code=sm_100a"
+        "-gencode=arch=compute_101,code=sm_101"
+        "-gencode=arch=compute_101a,code=sm_101a"
         "-gencode=arch=compute_120,code=sm_120"
+        "-gencode=arch=compute_120a,code=sm_120a"
     )
 else()
     list(APPEND SGL_KERNEL_CUDA_FLAGS
@@ -196,6 +209,7 @@ string(REPLACE "-D__CUDA_NO_BFLOAT16_CONVERSIONS__" "" CMAKE_CUDA_FLAGS "${CMAKE
 string(REPLACE "-D__CUDA_NO_HALF2_OPERATORS__"      "" CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS}")
 
 set(SOURCES
+    "csrc/allreduce/mscclpp_allreduce.cu"
     "csrc/allreduce/custom_all_reduce.cu"
     "csrc/attention/cascade.cu"
     "csrc/attention/merge_attn_states.cu"
@@ -210,6 +224,7 @@ set(SOURCES
     "csrc/gemm/fp8_blockwise_gemm_kernel.cu"
     "csrc/gemm/fp8_gemm_kernel.cu"
     "csrc/gemm/int8_gemm_kernel.cu"
+    "csrc/gemm/nvfp4_expert_quant.cu"
     "csrc/gemm/nvfp4_quant_entry.cu"
     "csrc/gemm/nvfp4_quant_kernels.cu"
     "csrc/gemm/nvfp4_scaled_mm_entry.cu"
@@ -222,12 +237,16 @@ set(SOURCES
     "csrc/moe/moe_align_kernel.cu"
     "csrc/moe/moe_fused_gate.cu"
     "csrc/moe/moe_topk_softmax_kernels.cu"
+    "csrc/moe/nvfp4_blockwise_moe.cu"
     "csrc/moe/fp8_blockwise_moe_kernel.cu"
     "csrc/moe/prepare_moe_input.cu"
+    "csrc/moe/ep_moe_reorder_kernel.cu"
+    "csrc/moe/ep_moe_silu_and_mul_kernel.cu"
     "csrc/speculative/eagle_utils.cu"
-    "csrc/speculative/speculative_sampling.cu"
     "csrc/speculative/packbit.cu"
+    "csrc/speculative/speculative_sampling.cu"
     "csrc/grammar/apply_token_bitmask_inplace_cuda.cu"
+    "csrc/kvcacheio/transfer.cu"
     "csrc/common_extension.cc"
     "${repo-flashinfer_SOURCE_DIR}/csrc/norm.cu"
     "${repo-flashinfer_SOURCE_DIR}/csrc/renorm.cu"
@@ -247,7 +266,27 @@ target_include_directories(common_ops PRIVATE
     ${repo-cutlass_SOURCE_DIR}/examples/common
     ${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src
 )
-target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt)
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))"
+    OUTPUT_VARIABLE TORCH_CXX11_ABI
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(TORCH_CXX11_ABI STREQUAL "0")
+    message(STATUS "Using old C++ ABI (-D_GLIBCXX_USE_CXX11_ABI=0)")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
+else()
+    message(STATUS "Using new C++11 ABI (-D_GLIBCXX_USE_CXX11_ABI=1)")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+endif()
+set(MSCCLPP_USE_CUDA ON)
+set(MSCCLPP_BYPASS_GPU_CHECK ON)
+set(MSCCLPP_BUILD_TESTS OFF)
+add_subdirectory(${repo-mscclpp_SOURCE_DIR})
+target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt mscclpp_static)
 
 target_compile_definitions(common_ops PRIVATE
     FLASHATTENTION_DISABLE_BACKWARD
