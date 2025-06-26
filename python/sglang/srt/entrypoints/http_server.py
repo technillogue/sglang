@@ -41,15 +41,31 @@ import orjson
 import requests
 import uvicorn
 import uvloop
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 
 from sglang.srt.disaggregation.utils import (
-    FakeBootstrapHost,
+    FAKE_BOOTSTRAP_HOST,
     register_disaggregation_server,
 )
 from sglang.srt.entrypoints.engine import _launch_subprocesses
+from sglang.srt.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    EmbeddingRequest,
+    ErrorResponse,
+    ModelCard,
+    ModelList,
+    ScoringRequest,
+    V1RerankReqInput,
+)
+from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
+from sglang.srt.entrypoints.openai.serving_completions import OpenAIServingCompletion
+from sglang.srt.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from sglang.srt.entrypoints.openai.serving_rerank import OpenAIServingRerank
+from sglang.srt.entrypoints.openai.serving_score import OpenAIServingScore
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -72,22 +88,9 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromTensorReqInput,
     VertexGenerateReqInput,
 )
+from sglang.srt.managers.template_manager import TemplateManager
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.metrics.func_timer import enable_func_timer
-from sglang.srt.openai_api.adapter import (
-    v1_batches,
-    v1_cancel_batch,
-    v1_chat_completions,
-    v1_completions,
-    v1_delete_file,
-    v1_embeddings,
-    v1_files_create,
-    v1_retrieve_batch,
-    v1_retrieve_file,
-    v1_retrieve_file_content,
-    v1_score,
-)
-from sglang.srt.openai_api.protocol import ModelCard, ModelList
 from sglang.srt.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
@@ -101,8 +104,8 @@ from sglang.srt.utils import (
 from sglang.srt.warmup import execute_warmups
 from sglang.utils import get_exception_traceback
 from sglang.version import __version__
-from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
-from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
+# from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
+# from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -112,6 +115,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 @dataclasses.dataclass
 class _GlobalState:
     tokenizer_manager: TokenizerManager
+    template_manager: TemplateManager
     scheduler_info: Dict
 
 
@@ -130,6 +134,7 @@ def serialize_port_args(port_args: PortArgs) -> dict:
         "detokenizer_ipc_name": port_args.detokenizer_ipc_name,
         "nccl_port": port_args.nccl_port,
         "rpc_ipc_name": port_args.rpc_ipc_name,
+        "metrics_ipc_name":port_args.metrics_ipc_name
     }
 
 def deserialize_port_args(data: dict) -> PortArgs:
@@ -151,6 +156,14 @@ def serialize_scheduler_info(scheduler_info: Dict) -> dict:
 def deserialize_scheduler_info(data: dict) -> Dict:
     """Deserialize scheduler_info from a shared dictionary"""
     return data
+
+# def serialize_tempalte_manager(tempalte_manager: TemplateManager)-> dict:
+#     """Serialize tempalte_manager into a shareable dictionary"""
+#     return dataclasses.asdict(tempalte_manager)
+
+# def deserialize_tempalte_manager(data: Dict) -> TemplateManager:
+#     """Deserialize tempalte_manager from a shared dictionary"""
+#     return TemplateManager(**data)
 
 def write_to_shared_memory(data: dict, name: str) -> shared_memory.SharedMemory:
     """Write data to shared memory"""
@@ -223,6 +236,24 @@ def update_tokenizer_mapping(worker_id: int, ipc_name: str, shm_name: str, lock_
 async def lifespan(fast_api_app: FastAPI):
     server_args = getattr(fast_api_app, "server_args", None)
     if server_args is not None:
+    
+        # Initialize OpenAI serving handlers
+        fast_api_app.state.openai_serving_completion = OpenAIServingCompletion(
+            _global_state.tokenizer_manager, _global_state.template_manager
+        )
+        fast_api_app.state.openai_serving_chat = OpenAIServingChat(
+            _global_state.tokenizer_manager, _global_state.template_manager
+        )
+        fast_api_app.state.openai_serving_embedding = OpenAIServingEmbedding(
+            _global_state.tokenizer_manager, _global_state.template_manager
+        )
+        fast_api_app.state.openai_serving_score = OpenAIServingScore(
+            _global_state.tokenizer_manager
+        )
+        fast_api_app.state.openai_serving_rerank = OpenAIServingRerank(
+            _global_state.tokenizer_manager
+        )
+
         if server_args.warmups is not None:
             await execute_warmups(
                 server_args.warmups.split(","), _global_state.tokenizer_manager
@@ -247,6 +278,7 @@ async def lifespan(fast_api_app: FastAPI):
                 server_args_data = read_from_shared_memory(f"server_args_{main_pid}")
                 scheduler_info_data = read_from_shared_memory(f"scheduler_info_{main_pid}")
                 lock_data = read_from_shared_memory(f"mapping_lock_{main_pid}")
+                # template_manager_data = read_from_shared_memory(f"tempalte_manager_{main_pid}")
                 break
             except FileNotFoundError as e:
                 if retry < max_retries - 1:
@@ -260,6 +292,7 @@ async def lifespan(fast_api_app: FastAPI):
         port_args = deserialize_port_args(port_args_data)
         server_args = deserialize_server_args(server_args_data)
         scheduler_info = deserialize_scheduler_info(scheduler_info_data)
+        # template_manager = deserialize_tempalte_manager(template_manager_data)
 
         port_args.tokenizer_ipc_name = f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
 
@@ -273,18 +306,42 @@ async def lifespan(fast_api_app: FastAPI):
 
         # Launch tokenizer process
         tokenizer_manager = TokenizerManager(server_args, port_args)
-        if server_args.chat_template:
-            load_chat_template_for_openai_api(
-                tokenizer_manager, server_args.chat_template, server_args.model_path
-            )
-        if server_args.completion_template:
-            load_completion_template_for_openai_api(server_args.completion_template)
+        template_manager = TemplateManager()
+        template_manager.initialize_templates(
+                tokenizer_manager=tokenizer_manager,
+                model_path=server_args.model_path,
+                chat_template=server_args.chat_template,
+                completion_template=server_args.completion_template,
+        )
+        # if server_args.chat_template:
+        #     load_chat_template_for_openai_api(
+        #         tokenizer_manager, server_args.chat_template, server_args.model_path
+        #     )
+        # if server_args.completion_template:
+        #     load_completion_template_for_openai_api(server_args.completion_template)
         tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
         set_global_state(
             _GlobalState(
                 tokenizer_manager=tokenizer_manager,
+                template_manager=template_manager,
                 scheduler_info=scheduler_info,
             )
+        )
+        # Initialize OpenAI serving handlers
+        fast_api_app.state.openai_serving_completion = OpenAIServingCompletion(
+            _global_state.tokenizer_manager, _global_state.template_manager
+        )
+        fast_api_app.state.openai_serving_chat = OpenAIServingChat(
+            _global_state.tokenizer_manager, _global_state.template_manager
+        )
+        fast_api_app.state.openai_serving_embedding = OpenAIServingEmbedding(
+            _global_state.tokenizer_manager, _global_state.template_manager
+        )
+        fast_api_app.state.openai_serving_score = OpenAIServingScore(
+            _global_state.tokenizer_manager
+        )
+        fast_api_app.state.openai_serving_rerank = OpenAIServingRerank(
+            _global_state.tokenizer_manager
         )
 
         print(f"mapping_length={mapping_len},worker_num={server_args.worker_num}")
@@ -350,6 +407,47 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Custom exception handlers to change validation error status codes
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Override FastAPI's default 422 validation error with 400"""
+    exc_str = str(exc)
+    errors_str = str(exc.errors())
+
+    if errors_str and errors_str != exc_str:
+        message = f"{exc_str} {errors_str}"
+    else:
+        message = exc_str
+
+    err = ErrorResponse(
+        message=message,
+        type=HTTPStatus.BAD_REQUEST.phrase,
+        code=HTTPStatus.BAD_REQUEST.value,
+    )
+
+    return ORJSONResponse(
+        status_code=400,
+        content=err.model_dump(),
+    )
+
+
+async def validate_json_request(raw_request: Request):
+    """Validate that the request content-type is application/json."""
+    content_type = raw_request.headers.get("content-type", "").lower()
+    media_type = content_type.split(";", maxsplit=1)[0]
+    if media_type != "application/json":
+        raise RequestValidationError(
+            errors=[
+                {
+                    "loc": ["header", "content-type"],
+                    "msg": "Unsupported Media Type: Only 'application/json' is allowed",
+                    "type": "value_error",
+                }
+            ]
+        )
+
 
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
 
@@ -531,6 +629,16 @@ async def classify_request(obj: EmbeddingReqInput, request: Request):
         return ret
     except ValueError as e:
         return _create_error_response(e)
+
+
+@app.api_route(
+    "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
+)
+async def v1_rerank_request(request: V1RerankReqInput, raw_request: Request):
+    """Endpoint for reranking documents based on query relevance."""
+    return await raw_request.app.state.openai_serving_rerank.handle_request(
+        request, raw_request
+    )
 
 
 @app.api_route("/flush_cache", methods=["GET", "POST"])
@@ -813,25 +921,39 @@ async def separate_reasoning_request(obj: SeparateReasoningReqInput, request: Re
 ##### OpenAI-compatible API endpoints #####
 
 
-@app.post("/v1/completions")
-async def openai_v1_completions(raw_request: Request):
-    return await v1_completions(_global_state.tokenizer_manager, raw_request)
+@app.post("/v1/completions", dependencies=[Depends(validate_json_request)])
+async def openai_v1_completions(request: CompletionRequest, raw_request: Request):
+    """OpenAI-compatible text completion endpoint."""
+    return await raw_request.app.state.openai_serving_completion.handle_request(
+        request, raw_request
+    )
 
 
-@app.post("/v1/chat/completions")
-async def openai_v1_chat_completions(raw_request: Request):
-    return await v1_chat_completions(_global_state.tokenizer_manager, raw_request)
+@app.post("/v1/chat/completions", dependencies=[Depends(validate_json_request)])
+async def openai_v1_chat_completions(
+    request: ChatCompletionRequest, raw_request: Request
+):
+    """OpenAI-compatible chat completion endpoint."""
+    return await raw_request.app.state.openai_serving_chat.handle_request(
+        request, raw_request
+    )
 
 
-@app.post("/v1/embeddings", response_class=ORJSONResponse)
-async def openai_v1_embeddings(raw_request: Request):
-    response = await v1_embeddings(_global_state.tokenizer_manager, raw_request)
-    return response
+@app.post(
+    "/v1/embeddings",
+    response_class=ORJSONResponse,
+    dependencies=[Depends(validate_json_request)],
+)
+async def openai_v1_embeddings(request: EmbeddingRequest, raw_request: Request):
+    """OpenAI-compatible embeddings endpoint."""
+    return await raw_request.app.state.openai_serving_embedding.handle_request(
+        request, raw_request
+    )
 
 
 @app.get("/v1/models", response_class=ORJSONResponse)
-def available_models():
-    """Show available models."""
+async def available_models():
+    """Show available models. OpenAI-compatible endpoint."""
     served_model_names = [_global_state.tokenizer_manager.served_model_name]
     model_cards = []
     for served_model_name in served_model_names:
@@ -845,45 +967,29 @@ def available_models():
     return ModelList(data=model_cards)
 
 
-@app.post("/v1/files")
-async def openai_v1_files(file: UploadFile = File(...), purpose: str = Form("batch")):
-    return await v1_files_create(
-        file, purpose, _global_state.tokenizer_manager.server_args.file_storage_path
+@app.get("/v1/models/{model:path}", response_class=ORJSONResponse)
+async def retrieve_model(model: str):
+    """Retrieves a model instance, providing basic information about the model."""
+    served_model_names = [_global_state.tokenizer_manager.served_model_name]
+
+    if model not in served_model_names:
+        return ORJSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": f"The model '{model}' does not exist",
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "code": "model_not_found",
+                }
+            },
+        )
+
+    return ModelCard(
+        id=model,
+        root=model,
+        max_model_len=_global_state.tokenizer_manager.model_config.context_len,
     )
-
-
-@app.delete("/v1/files/{file_id}")
-async def delete_file(file_id: str):
-    # https://platform.openai.com/docs/api-reference/files/delete
-    return await v1_delete_file(file_id)
-
-
-@app.post("/v1/batches")
-async def openai_v1_batches(raw_request: Request):
-    return await v1_batches(_global_state.tokenizer_manager, raw_request)
-
-
-@app.post("/v1/batches/{batch_id}/cancel")
-async def cancel_batches(batch_id: str):
-    # https://platform.openai.com/docs/api-reference/batch/cancel
-    return await v1_cancel_batch(_global_state.tokenizer_manager, batch_id)
-
-
-@app.get("/v1/batches/{batch_id}")
-async def retrieve_batch(batch_id: str):
-    return await v1_retrieve_batch(batch_id)
-
-
-@app.get("/v1/files/{file_id}")
-async def retrieve_file(file_id: str):
-    # https://platform.openai.com/docs/api-reference/files/retrieve
-    return await v1_retrieve_file(file_id)
-
-
-@app.get("/v1/files/{file_id}/content")
-async def retrieve_file_content(file_id: str):
-    # https://platform.openai.com/docs/api-reference/files/retrieve-contents
-    return await v1_retrieve_file_content(file_id)
 
 
 ## SageMaker API
@@ -894,8 +1000,13 @@ async def sagemaker_health() -> Response:
 
 
 @app.post("/invocations")
-async def sagemaker_chat_completions(raw_request: Request):
-    return await v1_chat_completions(_global_state.tokenizer_manager, raw_request)
+async def sagemaker_chat_completions(
+    request: ChatCompletionRequest, raw_request: Request
+):
+    """OpenAI-compatible chat completion endpoint."""
+    return await raw_request.app.state.openai_serving_chat.handle_request(
+        request, raw_request
+    )
 
 
 ## Vertex AI API
@@ -926,10 +1037,12 @@ async def vertex_generate(vertex_req: VertexGenerateReqInput, raw_request: Reque
     return ORJSONResponse({"predictions": ret})
 
 
-@app.post("/v1/score")
-async def v1_score_request(raw_request: Request):
+@app.post("/v1/score", dependencies=[Depends(validate_json_request)])
+async def v1_score_request(request: ScoringRequest, raw_request: Request):
     """Endpoint for the decoder-only scoring API. See Engine.score() for detailed documentation."""
-    return await v1_score(_global_state.tokenizer_manager, raw_request)
+    return await raw_request.app.state.openai_serving_score.handle_request(
+        request, raw_request
+    )
 
 
 def _create_error_response(e):
@@ -959,7 +1072,14 @@ def launch_server(
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
     """
     port_args = PortArgs.init_new(server_args)
-    tokenizer_manager, scheduler_info = _launch_subprocesses(server_args=server_args, port_args=port_args)
+    tokenizer_manager,template_manager, scheduler_info = _launch_subprocesses(server_args=server_args, port_args=port_args)
+    set_global_state(
+        _GlobalState(
+            tokenizer_manager=tokenizer_manager,
+            template_manager=template_manager,
+            scheduler_info=scheduler_info,
+        )
+    )
     if server_args.worker_num > 1 :
         # get main process ID
         main_pid = get_main_process_id()
@@ -990,26 +1110,26 @@ def launch_server(
             serialize_scheduler_info(scheduler_info),
             f"scheduler_info_{os.getpid()}"
         )
+        # # Write tempalte_manager to shared memory
+        # template_manager_shm = write_to_shared_memory(
+        #     serialize_tempalte_manager(template_manager),
+        #     f"template_manager_{os.getpid()}"
+        # )
         port_args_shm.close()
         server_args_shm.close()
         scheduler_info_shm.close()
         lock_shm.close()
-    else:
-        warmup_thread = threading.Thread(
-        target=_wait_and_warmup,
-        args=(
-            server_args,
-            pipe_finish_writer,
-            _global_state.tokenizer_manager.image_token_id,
-            launch_callback,
-        ),
-    )
-    set_global_state(
-        _GlobalState(
-            tokenizer_manager=tokenizer_manager,
-            scheduler_info=scheduler_info,
-        )
-    )
+        # template_manager_shm.close()
+    # else:
+    #     warmup_thread = threading.Thread(
+    #     target=_wait_and_warmup,
+    #     args=(
+    #         server_args,
+    #         pipe_finish_writer,
+    #         _global_state.tokenizer_manager.image_token_id,
+    #         launch_callback,
+    #     ),
+    # )
 
     # Add api key authorization
     if server_args.api_key:
@@ -1020,8 +1140,8 @@ def launch_server(
         add_prometheus_middleware(app)
         enable_func_timer()
 
-    # Send a warmup request - we will create the thread launch it
-    # in the lifespan after all other warmups have fired.
+    # # Send a warmup request - we will create the thread launch it
+    # # in the lifespan after all other warmups have fired.
     warmup_thread = threading.Thread(
         target=_wait_and_warmup,
         args=(
@@ -1050,7 +1170,7 @@ def launch_server(
         )
         else:
             uvicorn.run(
-                "app",
+                app,
                 host=server_args.host,
                 port=server_args.port,
                 log_level=server_args.log_level_http or server_args.log_level,
@@ -1063,6 +1183,7 @@ def launch_server(
             server_args_shm.unlink()
             scheduler_info_shm.unlink()
             lock_shm.unlink()
+            # template_manager_shm.unlink()
         else:
             warmup_thread.join()
 
@@ -1145,7 +1266,7 @@ def _wait_and_warmup(
                     "max_new_tokens": 8,
                     "ignore_eos": True,
                 },
-                "bootstrap_host": [FakeBootstrapHost] * server_args.dp_size,
+                "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
                 # This is a hack to ensure fake transfer is enabled during prefill warmup
                 # ensure each dp rank has a unique bootstrap_room during prefill warmup
                 "bootstrap_room": [
