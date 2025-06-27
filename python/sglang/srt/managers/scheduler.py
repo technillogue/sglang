@@ -266,10 +266,9 @@ class Scheduler(
         # Init inter-process communication
         context = zmq.Context(2)
         self.idle_sleeper = None
-
         if self.pp_rank == 0 and self.attn_tp_rank == 0:
             self.recv_from_tokenizer = get_zmq_socket(
-                context, zmq.PULL, port_args.scheduler_input_ipc_name, True
+                context, zmq.PULL, port_args.scheduler_input_ipc_name, False
             )
             self.send_to_tokenizer = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_ipc_name, False
@@ -740,6 +739,7 @@ class Scheduler(
         """A normal scheduler loop."""
         while True:
             recv_reqs = self.recv_requests()
+            print(f"event_loop_normal recv_reqs:{recv_reqs}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
@@ -2673,7 +2673,6 @@ def run_scheduler_process(
             }
         )
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
-
         if disaggregation_mode == DisaggregationMode.NULL:
             if server_args.pp_size > 1:
                 scheduler.event_loop_pp()

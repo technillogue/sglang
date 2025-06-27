@@ -104,8 +104,6 @@ from sglang.srt.utils import (
 from sglang.srt.warmup import execute_warmups
 from sglang.utils import get_exception_traceback
 from sglang.version import __version__
-# from sglang.srt.openai_api.adapter import load_chat_template_for_openai_api
-# from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
 
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -134,7 +132,8 @@ def serialize_port_args(port_args: PortArgs) -> dict:
         "detokenizer_ipc_name": port_args.detokenizer_ipc_name,
         "nccl_port": port_args.nccl_port,
         "rpc_ipc_name": port_args.rpc_ipc_name,
-        "metrics_ipc_name":port_args.metrics_ipc_name
+        "metrics_ipc_name":port_args.metrics_ipc_name,
+        "tokenizer_worker_ipc_name":port_args.tokenizer_worker_ipc_name
     }
 
 def deserialize_port_args(data: dict) -> PortArgs:
@@ -156,14 +155,6 @@ def serialize_scheduler_info(scheduler_info: Dict) -> dict:
 def deserialize_scheduler_info(data: dict) -> Dict:
     """Deserialize scheduler_info from a shared dictionary"""
     return data
-
-# def serialize_tempalte_manager(tempalte_manager: TemplateManager)-> dict:
-#     """Serialize tempalte_manager into a shareable dictionary"""
-#     return dataclasses.asdict(tempalte_manager)
-
-# def deserialize_tempalte_manager(data: Dict) -> TemplateManager:
-#     """Deserialize tempalte_manager from a shared dictionary"""
-#     return TemplateManager(**data)
 
 def write_to_shared_memory(data: dict, name: str) -> shared_memory.SharedMemory:
     """Write data to shared memory"""
@@ -292,7 +283,6 @@ async def lifespan(fast_api_app: FastAPI):
         port_args = deserialize_port_args(port_args_data)
         server_args = deserialize_server_args(server_args_data)
         scheduler_info = deserialize_scheduler_info(scheduler_info_data)
-        # template_manager = deserialize_tempalte_manager(template_manager_data)
 
         port_args.tokenizer_ipc_name = f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
 
@@ -305,7 +295,7 @@ async def lifespan(fast_api_app: FastAPI):
         )
 
         # Launch tokenizer process
-        tokenizer_manager = TokenizerManager(server_args, port_args)
+        tokenizer_manager = TokenizerManager(server_args, port_args, False)
         template_manager = TemplateManager()
         template_manager.initialize_templates(
                 tokenizer_manager=tokenizer_manager,
@@ -313,12 +303,7 @@ async def lifespan(fast_api_app: FastAPI):
                 chat_template=server_args.chat_template,
                 completion_template=server_args.completion_template,
         )
-        # if server_args.chat_template:
-        #     load_chat_template_for_openai_api(
-        #         tokenizer_manager, server_args.chat_template, server_args.model_path
-        #     )
-        # if server_args.completion_template:
-        #     load_completion_template_for_openai_api(server_args.completion_template)
+        
         tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
         set_global_state(
             _GlobalState(
@@ -356,9 +341,10 @@ async def lifespan(fast_api_app: FastAPI):
         # wait for detokenizer manager to register zmq
         time.sleep(12)
         logger.info("warmup_thread start")
-        print(f"warmup_thread start p")
+        print(f"warmup_thread start")
 
         # Create a warmup thread for each worker
+        #if mapping_len == server_args.worker_num:
         warmup_thread = threading.Thread(
             target=_wait_and_warmup,
             args=(
@@ -1110,26 +1096,23 @@ def launch_server(
             serialize_scheduler_info(scheduler_info),
             f"scheduler_info_{os.getpid()}"
         )
-        # # Write tempalte_manager to shared memory
-        # template_manager_shm = write_to_shared_memory(
-        #     serialize_tempalte_manager(template_manager),
-        #     f"template_manager_{os.getpid()}"
-        # )
+        
         port_args_shm.close()
         server_args_shm.close()
         scheduler_info_shm.close()
         lock_shm.close()
         # template_manager_shm.close()
-    # else:
-    #     warmup_thread = threading.Thread(
-    #     target=_wait_and_warmup,
-    #     args=(
-    #         server_args,
-    #         pipe_finish_writer,
-    #         _global_state.tokenizer_manager.image_token_id,
-    #         launch_callback,
-    #     ),
-    # )
+    else:
+        warmup_thread = threading.Thread(
+        target=_wait_and_warmup,
+        args=(
+            server_args,
+            pipe_finish_writer,
+            _global_state.tokenizer_manager.image_token_id,
+            launch_callback,
+        ),
+    )
+        app.warmup_thread = warmup_thread
 
     # Add api key authorization
     if server_args.api_key:
@@ -1142,16 +1125,16 @@ def launch_server(
 
     # # Send a warmup request - we will create the thread launch it
     # # in the lifespan after all other warmups have fired.
-    warmup_thread = threading.Thread(
-        target=_wait_and_warmup,
-        args=(
-            server_args,
-            pipe_finish_writer,
-            _global_state.tokenizer_manager.image_token_id,
-            launch_callback,
-        ),
-    )
-    app.warmup_thread = warmup_thread
+    # warmup_thread = threading.Thread(
+    #     target=_wait_and_warmup,
+    #     args=(
+    #         server_args,
+    #         pipe_finish_writer,
+    #         _global_state.tokenizer_manager.image_token_id,
+    #         launch_callback,
+    #     ),
+    # )
+    # app.warmup_thread = warmup_thread
 
     try:
         # Update logging configs
@@ -1183,7 +1166,6 @@ def launch_server(
             server_args_shm.unlink()
             scheduler_info_shm.unlink()
             lock_shm.unlink()
-            # template_manager_shm.unlink()
         else:
             warmup_thread.join()
 

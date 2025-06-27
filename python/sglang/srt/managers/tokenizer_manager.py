@@ -169,6 +169,7 @@ class TokenizerManager:
         self,
         server_args: ServerArgs,
         port_args: PortArgs,
+        is_mian: Optional[bool]= True,
     ):
         # Parse args
         self.server_args = server_args
@@ -180,17 +181,39 @@ class TokenizerManager:
             if server_args.preferred_sampling_params
             else None
         )
+        self.is_main = is_mian
 
         # Init inter-process communication
-        context = zmq.asyncio.Context(2)
+        context = zmq.asyncio.Context(3)
         self.recv_from_detokenizer = get_zmq_socket(
             context, zmq.PULL, port_args.tokenizer_ipc_name, True
         )
-        self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, port_args.scheduler_input_ipc_name, False
-        )
+        if server_args.worker_num > 1:
+            if is_mian:
+                self.send_to_scheduler = get_zmq_socket(
+                    context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+                )
+                self.receive_from_worker = get_zmq_socket(
+                    context, zmq.PULL, port_args.tokenizer_worker_ipc_name, True
+                )
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(target=self._run_loop, daemon=True)
+                self._thread.start()
+                self._task = asyncio.run_coroutine_threadsafe(
+                    self.router_worker_obj(), self._loop
+                )
+                
+            else:
+                # actual send to main receiver_from_worker
+                self.send_to_scheduler = get_zmq_socket(
+                    context, zmq.PUSH, port_args.tokenizer_worker_ipc_name, False
+                )
+        else:
+            self.send_to_scheduler = get_zmq_socket(
+                    context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+                )
+        
         self.workder_id = os.getpid()
-
         # Read model args
         self.model_path = server_args.model_path
         self.served_model_name = server_args.served_model_name
@@ -402,6 +425,14 @@ class TokenizerManager:
         self.current_load = 0
         self.current_load_lock = asyncio.Lock()
 
+    def _run_loop(self):
+        self._loop.run_forever()
+
+    async def router_worker_obj(self):
+        while True:
+            recv_obj = await self.receive_from_worker.recv_pyobj()
+            await self.send_to_scheduler.send_pyobj(recv_obj)
+
     async def generate_request(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
@@ -410,7 +441,6 @@ class TokenizerManager:
         created_time = time.time()
          # Get the current worker's ID
         worker_id = os.getpid()
-
         # Modify rid, add worker_id
         if isinstance(obj.rid, list):
             # If it's an array, add worker_id prefix to each element
@@ -419,6 +449,7 @@ class TokenizerManager:
             # If it's a single value, add worker_id prefix
             obj.rid = f"{worker_id}_{obj.rid}"
         self.auto_create_handle_loop()
+        print(f"obj:{obj.__dict__}, worker_id:{worker_id}")
 
         if isinstance(obj, EmbeddingReqInput) and self.is_generation:
             raise ValueError(
@@ -673,6 +704,7 @@ class TokenizerManager:
         self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
         self.rid_to_state[obj.rid] = state
+        print(f"_send_one_request end:{self.send_to_scheduler.getsockopt(zmq.LAST_ENDPOINT).decode()}")
         return state
 
     async def _wait_one_response(

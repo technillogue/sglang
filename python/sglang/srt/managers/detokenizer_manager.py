@@ -97,7 +97,6 @@ class DetokenizerManager:
         self.send_to_tokenizer = get_zmq_socket(
             context, zmq.PUSH, port_args.tokenizer_ipc_name, False
         )
-
         if server_args.skip_tokenizer_init:
             self.tokenizer = None
         else:
@@ -163,6 +162,7 @@ class DetokenizerManager:
         while True:
             recv_obj = self.recv_from_scheduler.recv_pyobj()
             output = self._request_dispatcher(recv_obj)
+            print(f"detokenize event_loop:{output.__dict__}")
             if self.worker_num <= 1:
                 self.send_to_tokenizer.send_pyobj(output)
             else:
