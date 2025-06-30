@@ -1028,6 +1028,8 @@ class Scheduler(
                     if self.recv_from_rpc is not None:
                         self.recv_from_rpc.send_pyobj(output)
                 else:
+                    if recv_req.rids is not None:
+                        output.rids = recv_req.rids
                     self.send_to_tokenizer.send_pyobj(output)
 
     def handle_generate_request(

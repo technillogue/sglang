@@ -227,7 +227,7 @@ def update_tokenizer_mapping(worker_id: int, ipc_name: str, shm_name: str, lock_
 async def lifespan(fast_api_app: FastAPI):
     server_args = getattr(fast_api_app, "server_args", None)
     if server_args is not None:
-    
+
         # Initialize OpenAI serving handlers
         fast_api_app.state.openai_serving_completion = OpenAIServingCompletion(
             _global_state.tokenizer_manager, _global_state.template_manager
@@ -303,7 +303,7 @@ async def lifespan(fast_api_app: FastAPI):
                 chat_template=server_args.chat_template,
                 completion_template=server_args.completion_template,
         )
-        
+
         tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
         set_global_state(
             _GlobalState(
@@ -1096,7 +1096,7 @@ def launch_server(
             serialize_scheduler_info(scheduler_info),
             f"scheduler_info_{os.getpid()}"
         )
-        
+
         port_args_shm.close()
         server_args_shm.close()
         scheduler_info_shm.close()
@@ -1211,6 +1211,7 @@ def _wait_and_warmup(
             "temperature": 0,
             "max_new_tokens": max_new_tokens,
         },
+        "rid": f"{os.getpid()}",
     }
     if server_args.skip_tokenizer_init:
         json_data["input_ids"] = [[10, 11, 12] for _ in range(server_args.dp_size)]

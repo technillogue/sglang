@@ -19,6 +19,7 @@ import dataclasses
 import json
 import logging
 import math
+import multiprocessing
 import os
 import pickle
 import signal
@@ -29,6 +30,7 @@ import uuid
 from collections import deque
 from datetime import datetime
 from http import HTTPStatus
+from multiprocessing import shared_memory
 from typing import (
     Any,
     Awaitable,
@@ -127,6 +129,23 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 logger = logging.getLogger(__name__)
 
 
+def read_from_shared_memory(name: str) -> bytes:
+    """Read data from shared memory"""
+    try:
+        shm = shared_memory.SharedMemory(name=name)
+        data = bytes(shm.buf)
+        shm.close()
+        return data
+    except Exception:
+        return b''
+
+def deserialize_tokenizer_mapping(data: bytes) -> dict:
+    """Deserialize worker mapping from bytes"""
+    if not data:
+        return {}
+    return eval(data.decode())
+
+
 @dataclasses.dataclass
 class ReqState:
     """Store the state a request."""
@@ -182,7 +201,7 @@ class TokenizerManager:
             else None
         )
         self.is_main = is_mian
-
+        print(f"Tokenizer init:is_main={is_mian}, worker_num={server_args.worker_num}, tokenizer_ipc_name={port_args.tokenizer_ipc_name}")
         # Init inter-process communication
         context = zmq.asyncio.Context(3)
         self.recv_from_detokenizer = get_zmq_socket(
@@ -202,7 +221,11 @@ class TokenizerManager:
                 self._task = asyncio.run_coroutine_threadsafe(
                     self.router_worker_obj(), self._loop
                 )
-                
+                # Start handle_loop simultaneously
+                self._handle_task = asyncio.run_coroutine_threadsafe(
+                    print_exception_wrapper(self.handle_loop), self._loop
+                )
+
             else:
                 # actual send to main receiver_from_worker
                 self.send_to_scheduler = get_zmq_socket(
@@ -212,7 +235,7 @@ class TokenizerManager:
             self.send_to_scheduler = get_zmq_socket(
                     context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
                 )
-        
+
         self.workder_id = os.getpid()
         # Read model args
         self.model_path = server_args.model_path
@@ -299,41 +322,41 @@ class TokenizerManager:
 
         # Communicators
         self.init_weights_update_group_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.update_weights_from_distributed_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.update_weights_from_tensor_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.get_weights_by_name_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.release_memory_occupation_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.resume_memory_occupation_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.slow_down_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.flush_cache_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.profile_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
-        self.health_check_communitcator = _Communicator(self.send_to_scheduler, 1)
+        self.health_check_communitcator = _Communicator(self.send_to_scheduler, 1, server_args)
         self.get_internal_state_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.set_internal_state_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.expert_distribution_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, server_args.dp_size, server_args
         )
 
         self._result_dispatcher = TypeBasedDispatcher(
@@ -449,7 +472,6 @@ class TokenizerManager:
             # If it's a single value, add worker_id prefix
             obj.rid = f"{worker_id}_{obj.rid}"
         self.auto_create_handle_loop()
-        print(f"obj:{obj.__dict__}, worker_id:{worker_id}")
 
         if isinstance(obj, EmbeddingReqInput) and self.is_generation:
             raise ValueError(
@@ -1062,6 +1084,7 @@ class TokenizerManager:
     async def get_internal_state(self) -> List[Dict[Any, Any]]:
         req = GetInternalStateReq()
         responses: List[GetInternalStateReqOutput] = (
+            # await asyncio.wait_for(self.get_internal_state_communicator(req), timeout=5.0)
             await self.get_internal_state_communicator(req)
         )
         # Many DP ranks
@@ -1205,11 +1228,104 @@ class TokenizerManager:
 
     async def handle_loop(self):
         """The event loop that handles requests"""
+        print(f"[DEBUG] handle_loop started: worker_num={self.server_args.worker_num}, is_main={self.is_main}")
+        if self.server_args.worker_num > 1 and self.is_main:
+            self._load_tokenizer_mapping()
 
         while True:
             recv_obj = await self.recv_from_detokenizer.recv_pyobj()
-            self._result_dispatcher(recv_obj)
+            # In multi-worker mode, distribute results to corresponding workers
+            if self.server_args.worker_num > 1 and  self.is_main:
+                await self._distribute_result_to_workers(recv_obj)
+            else:
+                # In single worker mode, process directly
+                self._result_dispatcher(recv_obj)
+
             self.last_receive_tstamp = time.time()
+
+    def _load_tokenizer_mapping(self):
+        """Load tokenizer mapping from shared memory"""
+        main_pid = os.getpid()
+        max_retries = 60  # Maximum number of retries
+        retry_interval = 10  # Retry interval in seconds
+
+        for retry in range(max_retries):
+            try:
+                # Read tokenizer mapping information
+                tokenizer_mapping_data = read_from_shared_memory(f"tokenizer_mapping_{main_pid}")
+                ipc_mapping = deserialize_tokenizer_mapping(tokenizer_mapping_data)
+                print(f"TokenizerManager loaded tokenizer mapping: {ipc_mapping}")
+
+                # Check if worker count matches
+                if len(ipc_mapping) >= self.server_args.worker_num:
+                    # Initialize tokenizer_mapping if not exists
+                    if not hasattr(self, 'tokenizer_mapping'):
+                        self.tokenizer_mapping = {}
+
+                    # Create ZMQ context if needed
+                    if not hasattr(self, '_zmq_context'):
+                        self._zmq_context = zmq.Context()
+
+                    # Create ZMQ socket for each worker (only if not already exists)
+                    for worker_id, ipc_name in ipc_mapping.items():
+                        worker_id_int = int(worker_id)
+                        if worker_id_int not in self.tokenizer_mapping:
+                            socket = get_zmq_socket(self._zmq_context, zmq.PUSH, ipc_name, False)
+                            self.tokenizer_mapping[worker_id_int] = socket
+                            print(f"Created ZMQ socket for worker {worker_id} with ipc_name {ipc_name}")
+                        else:
+                            print(f"ZMQ socket for worker {worker_id} already exists, skipping creation")
+                    break  # Successfully loaded all workers, exit retry loop
+                else:
+                    print(f"Waiting for all workers to register... Current: {len(ipc_mapping)}/{self.server_args.worker_num}")
+                    if retry < max_retries - 1:
+                        time.sleep(retry_interval)
+                    else:
+                        raise RuntimeError(
+                            f"Worker registration timeout. "
+                            f"Expected worker count: {self.server_args.worker_num}, "
+                            f"Current registered count: {len(ipc_mapping)}"
+                        )
+            except Exception as e:
+                if retry < max_retries - 1:
+                    print(f"Failed to load tokenizer mapping, retrying in {retry_interval} seconds: {e}")
+                    time.sleep(retry_interval)
+                else:
+                    raise RuntimeError(f"Failed to load tokenizer mapping after {max_retries} retries: {e}")
+
+    async def _distribute_result_to_workers(self, recv_obj):
+        """Distribute result to corresponding workers based on rid"""
+        if not hasattr(self, 'tokenizer_mapping') or not self.tokenizer_mapping:
+            print("Tokenizer mapping not available, reloading...")
+            self._load_tokenizer_mapping()
+
+        # Extract worker_id from rid
+        if isinstance(recv_obj.rids, list):
+            worker_ids = [int(rid.split('_')[0]) for rid in recv_obj.rids]
+        elif isinstance(recv_obj.rids, str):
+            worker_ids = [int(recv_obj.rids.split('_')[0])]
+        else:
+            raise RuntimeError(f"recv_obj.rids is not list")
+
+        # Distribute result to each worker
+        for i, worker_id in enumerate(worker_ids):
+            if worker_id in self.tokenizer_mapping:
+                # Send to worker
+                self.tokenizer_mapping[worker_id].send_pyobj(recv_obj)
+                print(f"Sent result to worker {worker_id} recv_obj: {recv_obj.__dict__}")
+            else:
+                # Worker not found in mapping, reload and retry
+                print(f"Worker {worker_id} not found in mapping, reloading...")
+                self._load_tokenizer_mapping()
+                if worker_id in self.tokenizer_mapping:
+                    # Send to worker
+                    self.tokenizer_mapping[worker_id].send_pyobj(recv_obj)
+                    print(f"Sent result to worker {worker_id}")
+                else:
+                    raise RuntimeError(
+                        f"Socket not found for worker_id={worker_id}. "
+                        f"Available worker_ids: {list(self.tokenizer_mapping.keys())}"
+                    )
 
     def _handle_batch_output(
         self,
@@ -1643,9 +1759,10 @@ T = TypeVar("T")
 class _Communicator(Generic[T]):
     """Note: The communicator now only run up to 1 in-flight request at any time."""
 
-    def __init__(self, sender, fan_out: int):
+    def __init__(self, sender, fan_out: int, server_args=None):
         self._sender = sender
         self._fan_out = fan_out
+        self._server_args = server_args
         self._result_event: Optional[asyncio.Event] = None
         self._result_values: Optional[List[T]] = None
         self._ready_queue: Deque[asyncio.Future] = deque()
@@ -1659,6 +1776,9 @@ class _Communicator(Generic[T]):
             assert self._result_values is None
 
         if obj:
+            if self._server_args and self._server_args.worker_num > 1 and obj.rids is None:
+                obj.rids = f"{os.getpid()}_{uuid.uuid4().hex}_Communicator"
+                print(f"[DEBUG] _Communicator.__call__ - worker_id: {os.getpid()}, obj: {obj.__dict__}")
             self._sender.send_pyobj(obj)
 
         self._result_event = asyncio.Event()

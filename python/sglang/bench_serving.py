@@ -73,6 +73,7 @@ class RequestFuncInput:
     lora_name: str
     image_data: str
     extra_request_body: Dict[str, Any]
+    rid:str
 
 
 @dataclass
@@ -362,6 +363,7 @@ async def async_request_sglang_generate(
             "lora_path": request_func_input.lora_name,
             "return_logprob": args.return_logprob,
             "logprob_start_len": -1,
+            "rid": request_func_input.rid,
             **request_func_input.extra_request_body,
         }
 
@@ -655,6 +657,7 @@ class DatasetRow:
     prompt_len: int
     output_len: int
     image_data: Optional[str] = None
+    rid:str=None
 
 
 def sample_mmmu_requests(
@@ -947,6 +950,7 @@ def sample_random_requests(
                     prompt=input_content,
                     prompt_len=int(input_lens[i]),
                     output_len=int(output_lens[i]),
+                    rid=str(i),
                 )
             )
     else:
@@ -1223,6 +1227,7 @@ async def benchmark(
         lora_name=lora_name,
         image_data=test_request.image_data,
         extra_request_body=extra_request_body,
+        rid=test_request.rid,
     )
 
     # Run warmup requests
@@ -1281,6 +1286,7 @@ async def benchmark(
             lora_name=lora_name,
             image_data=request.image_data,
             extra_request_body=extra_request_body,
+            rid=request.rid,
         )
 
         tasks.append(
@@ -1288,15 +1294,14 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
             )
         )
-    outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
+    outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
     # Stop profiler
     if profile:
         print("Stopping profiler...")
         profile_output = await async_request_profile(api_url=base_url + "/stop_profile")
         if profile_output.success:
             print("Profiler stopped")
-
     if pbar is not None:
         pbar.close()
 
