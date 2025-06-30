@@ -1733,9 +1733,6 @@ class PortArgs:
                 metrics_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 tokenizer_worker_ipc_name=None
             )
-            if server_args.worker_num > 1:
-                    port_args.tokenizer_worker_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
-            return port_args
         else:
             # DP attention. Use TCP + port to handle both single-node and multi-node.
             if server_args.nnodes == 1 and server_args.dist_init_addr is None:
@@ -1758,7 +1755,7 @@ class PortArgs:
             else:
                 scheduler_input_port = port_base + 4 + 1 + dp_rank
 
-            return PortArgs(
+            port_args = PortArgs(
                 tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
                 scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base + 1}",
@@ -1767,6 +1764,9 @@ class PortArgs:
                 metrics_ipc_name=f"tcp://{dist_init_host}:{port_base + 3}",
                 tokenizer_worker_ipc_name=None
             )
+        if server_args.worker_num > 1:
+            port_args.tokenizer_worker_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+        return port_args
 
 
 class LoRAPathAction(argparse.Action):
