@@ -1211,7 +1211,6 @@ def _wait_and_warmup(
             "temperature": 0,
             "max_new_tokens": max_new_tokens,
         },
-        "rid": f"{os.getpid()}",
     }
     if server_args.skip_tokenizer_init:
         json_data["input_ids"] = [[10, 11, 12] for _ in range(server_args.dp_size)]

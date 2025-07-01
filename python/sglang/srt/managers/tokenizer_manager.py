@@ -30,7 +30,6 @@ import uuid
 from collections import deque
 from datetime import datetime
 from http import HTTPStatus
-from multiprocessing import shared_memory
 from typing import (
     Any,
     Awaitable,
@@ -63,6 +62,10 @@ from sglang.srt.hf_transformers_utils import (
     get_processor,
     get_tokenizer,
     get_tokenizer_from_processor,
+)
+from sglang.srt.managers.detokenizer_manager import (
+    read_from_shared_memory,
+    deserialize_tokenizer_mapping,
 )
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -129,22 +132,6 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 logger = logging.getLogger(__name__)
 
 
-def read_from_shared_memory(name: str) -> bytes:
-    """Read data from shared memory"""
-    try:
-        shm = shared_memory.SharedMemory(name=name)
-        data = bytes(shm.buf)
-        shm.close()
-        return data
-    except Exception:
-        return b''
-
-def deserialize_tokenizer_mapping(data: bytes) -> dict:
-    """Deserialize worker mapping from bytes"""
-    if not data:
-        return {}
-    return eval(data.decode())
-
 
 @dataclasses.dataclass
 class ReqState:
@@ -188,7 +175,7 @@ class TokenizerManager:
         self,
         server_args: ServerArgs,
         port_args: PortArgs,
-        is_mian: Optional[bool]= True,
+        is_main: Optional[bool]= True,
     ):
         # Parse args
         self.server_args = server_args
@@ -200,15 +187,14 @@ class TokenizerManager:
             if server_args.preferred_sampling_params
             else None
         )
-        self.is_main = is_mian
-        print(f"Tokenizer init:is_main={is_mian}, worker_num={server_args.worker_num}, tokenizer_ipc_name={port_args.tokenizer_ipc_name}")
+        self.is_main = is_main
         # Init inter-process communication
         context = zmq.asyncio.Context(3)
         self.recv_from_detokenizer = get_zmq_socket(
             context, zmq.PULL, port_args.tokenizer_ipc_name, True
         )
         if server_args.worker_num > 1:
-            if is_mian:
+            if self.is_main:
                 self.send_to_scheduler = get_zmq_socket(
                     context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
                 )
@@ -236,7 +222,7 @@ class TokenizerManager:
                     context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
                 )
 
-        self.workder_id = os.getpid()
+        self.worker_id = os.getpid()
         # Read model args
         self.model_path = server_args.model_path
         self.served_model_name = server_args.served_model_name
@@ -462,15 +448,6 @@ class TokenizerManager:
         request: Optional[fastapi.Request] = None,
     ):
         created_time = time.time()
-         # Get the current worker's ID
-        worker_id = os.getpid()
-        # Modify rid, add worker_id
-        if isinstance(obj.rid, list):
-            # If it's an array, add worker_id prefix to each element
-            obj.rid = [f"{worker_id}_{rid}" for rid in obj.rid]
-        else:
-            # If it's a single value, add worker_id prefix
-            obj.rid = f"{worker_id}_{obj.rid}"
         self.auto_create_handle_loop()
 
         if isinstance(obj, EmbeddingReqInput) and self.is_generation:
@@ -481,6 +458,14 @@ class TokenizerManager:
 
         obj.normalize_batch_and_arguments()
 
+        # Modify rid, add worker_id
+        if isinstance(obj.rid, list):
+            # If it's an array, add worker_id prefix to each element
+            obj.rid = [f"{self.worker_id}_{rid}" for rid in obj.rid]
+        else:
+            # If it's a single value, add worker_id prefix
+            obj.rid = f"{self.worker_id}_{obj.rid}"
+        
         if isinstance(obj, GenerateReqInput):
             return_hidden_states = obj.return_hidden_states
             has_return_hidden_states = return_hidden_states == True or (
@@ -726,7 +711,6 @@ class TokenizerManager:
         self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
         self.rid_to_state[obj.rid] = state
-        print(f"_send_one_request end:{self.send_to_scheduler.getsockopt(zmq.LAST_ENDPOINT).decode()}")
         return state
 
     async def _wait_one_response(
@@ -1084,7 +1068,6 @@ class TokenizerManager:
     async def get_internal_state(self) -> List[Dict[Any, Any]]:
         req = GetInternalStateReq()
         responses: List[GetInternalStateReqOutput] = (
-            # await asyncio.wait_for(self.get_internal_state_communicator(req), timeout=5.0)
             await self.get_internal_state_communicator(req)
         )
         # Many DP ranks
@@ -1228,7 +1211,6 @@ class TokenizerManager:
 
     async def handle_loop(self):
         """The event loop that handles requests"""
-        print(f"[DEBUG] handle_loop started: worker_num={self.server_args.worker_num}, is_main={self.is_main}")
         if self.server_args.worker_num > 1 and self.is_main:
             self._load_tokenizer_mapping()
 
@@ -1254,7 +1236,7 @@ class TokenizerManager:
                 # Read tokenizer mapping information
                 tokenizer_mapping_data = read_from_shared_memory(f"tokenizer_mapping_{main_pid}")
                 ipc_mapping = deserialize_tokenizer_mapping(tokenizer_mapping_data)
-                print(f"TokenizerManager loaded tokenizer mapping: {ipc_mapping}")
+                print(f"Main TokenizerManager loaded tokenizer mapping: {ipc_mapping}")
 
                 # Check if worker count matches
                 if len(ipc_mapping) >= self.server_args.worker_num:
@@ -1309,23 +1291,69 @@ class TokenizerManager:
 
         # Distribute result to each worker
         for i, worker_id in enumerate(worker_ids):
-            if worker_id in self.tokenizer_mapping:
-                # Send to worker
-                self.tokenizer_mapping[worker_id].send_pyobj(recv_obj)
-                print(f"Sent result to worker {worker_id} recv_obj: {recv_obj.__dict__}")
-            else:
-                # Worker not found in mapping, reload and retry
-                print(f"Worker {worker_id} not found in mapping, reloading...")
-                self._load_tokenizer_mapping()
+            if not isinstance(recv_obj,(BatchTokenIDOut,BatchEmbeddingOut)):
+                if worker_id not in self.tokenizer_mapping:
+                    # Worker not found in mapping, reload and retry
+                    print(f"Worker {worker_id} not found in mapping, reloading...")
+                    self._load_tokenizer_mapping()    
                 if worker_id in self.tokenizer_mapping:
                     # Send to worker
                     self.tokenizer_mapping[worker_id].send_pyobj(recv_obj)
-                    print(f"Sent result to worker {worker_id}")
                 else:
                     raise RuntimeError(
                         f"Socket not found for worker_id={worker_id}. "
                         f"Available worker_ids: {list(self.tokenizer_mapping.keys())}"
                     )
+            else:
+                # if skip tokenizer init = true，this part will be run
+                if worker_id not in self.tokenizer_mapping:
+                    raise RuntimeError(
+                        f"socket not found for worker_id: {worker_id}"
+                    )
+                else:
+                    if isinstance(recv_obj, BatchTokenIDOut):
+                        new_recv_obj = BatchTokenIDOut(
+                            [recv_obj.rids[i]],
+                            [recv_obj.finished_reasons[i]] if len(recv_obj.finished_reasons)>i else None,
+                            [recv_obj.decoded_texts[i]] if len(recv_obj.decoded_texts)>i else None,
+                            [recv_obj.decode_ids[i]] if len(recv_obj.decode_ids)>i else None,
+                            [recv_obj.read_offsets[i]] if len(recv_obj.read_offsets)>i else None,
+                            [recv_obj.output_ids[i]] if recv_obj.output_ids and len(recv_obj.output_ids) > i else None,
+                            [recv_obj.skip_special_tokens[i]] if len(recv_obj.skip_special_tokens) > i else None,
+                            [recv_obj.spaces_between_special_tokens[i]] if len(recv_obj.spaces_between_special_tokens) > i else None,
+                            [recv_obj.no_stop_trim[i]] if len(recv_obj.no_stop_trim) > i else None,
+                            [recv_obj.prompt_tokens[i]] if len(recv_obj.prompt_tokens) > i else None,
+                            [recv_obj.completion_tokens[i]] if len(recv_obj.completion_tokens) > i else None,
+                            [recv_obj.cached_tokens[i]] if len(recv_obj.cached_tokens) > i else None,
+                            [recv_obj.spec_verify_ct[i]] if len(recv_obj.spec_verify_ct) > i else None,
+                            [recv_obj.input_token_logprobs_val[i]] if recv_obj.input_token_logprobs_val else None,
+                            [recv_obj.input_token_logprobs_idx[i]] if recv_obj.input_token_logprobs_idx else None,
+                            [recv_obj.output_token_logprobs_val[i]] if recv_obj.output_token_logprobs_val else None,
+                            [recv_obj.output_token_logprobs_idx[i]] if recv_obj.output_token_logprobs_idx else None,
+                            [recv_obj.input_top_logprobs_val[i]] if recv_obj.input_top_logprobs_val else None,
+                            [recv_obj.input_top_logprobs_idx[i]] if recv_obj.input_top_logprobs_idx else None,
+                            [recv_obj.output_top_logprobs_val[i]] if recv_obj.output_top_logprobs_val else None,
+                            [recv_obj.output_top_logprobs_idx[i]] if recv_obj.output_top_logprobs_idx else None,
+                            [recv_obj.input_token_ids_logprobs_val[i]] if recv_obj.input_token_ids_logprobs_val else None,
+                            [recv_obj.input_token_ids_logprobs_idx[i]] if recv_obj.input_token_ids_logprobs_idx else None,
+                            [recv_obj.output_token_ids_logprobs_val[i]] if recv_obj.output_token_ids_logprobs_val else None,
+                            [recv_obj.output_token_ids_logprobs_idx[i]] if recv_obj.output_token_ids_logprobs_idx else None,
+                            [recv_obj.output_hidden_states[i]] if recv_obj.output_hidden_states else None 
+                        )
+                    else:
+                        new_recv_obj= BatchEmbeddingOut(
+                            [recv_obj.rids[i]],
+                            [recv_obj.finished_reasons[i]] if len(recv_obj.finished_reasons) > i else None,
+                            [recv_obj.embeddings[i]] if len(recv_obj.embeddings) > i else None,
+                            [recv_obj.prompt_tokens[i]] if len(recv_obj.prompt_tokens) > i else None,
+                            [recv_obj.cached_tokens[i]] if len(recv_obj.cached_tokens) > i else None,
+                        )
+                    try:
+                        self.tokenizer_mapping[worker_id].send_pyobj(new_recv_obj)
+                    except zmq.ZMQError as e:
+                        raise RuntimeError(
+                            f"Failed to send result to worker {worker_id}: {e}"
+                        ) from e
 
     def _handle_batch_output(
         self,
@@ -1778,7 +1806,6 @@ class _Communicator(Generic[T]):
         if obj:
             if self._server_args and self._server_args.worker_num > 1 and obj.rids is None:
                 obj.rids = f"{os.getpid()}_{uuid.uuid4().hex}_Communicator"
-                print(f"[DEBUG] _Communicator.__call__ - worker_id: {os.getpid()}, obj: {obj.__dict__}")
             self._sender.send_pyobj(obj)
 
         self._result_event = asyncio.Event()

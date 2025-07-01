@@ -34,7 +34,6 @@ from sglang.srt.managers.schedule_batch import BaseFinishReason
 from sglang.srt.sampling.sampling_params import SamplingParams
 
 
-
 @dataclass
 class SessionParams:
     id: Optional[str] = None

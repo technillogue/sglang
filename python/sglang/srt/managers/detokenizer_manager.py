@@ -135,11 +135,15 @@ class DetokenizerManager:
                         worker_ids = [int(rid.split('_')[0]) for rid in recv_obj.rids]
                     else:
                         raise RuntimeError(
-                                    f"recv_obj.rids is not list"
-                                )
+                            f"recv_obj.rids is not list"
+                        )
 
                     # Send data using the corresponding socket
                     for i, worker_id in enumerate(worker_ids):
+                        if worker_id not in self.tokenizer_mapping:
+                            # Worker not found in mapping, reload and retry
+                            print(f"Worker {worker_id} not found in mapping, reloading...")
+                            self._load_tokenizer_mapping()
                         if worker_id in self.tokenizer_mapping:
                             # Create a new output object based on the type
                             if isinstance(output, BatchEmbeddingOut):
@@ -173,8 +177,7 @@ class DetokenizerManager:
                                     output_token_ids_logprobs_val=[output.output_token_ids_logprobs_val[i]] if output.output_token_ids_logprobs_val else None,
                                     output_token_ids_logprobs_idx=[output.output_token_ids_logprobs_idx[i]] if output.output_token_ids_logprobs_idx else None,
                                     output_hidden_states=[output.output_hidden_states[i]] if output.output_hidden_states else None
-                )
-
+                                )
                             elif isinstance(output, BatchMultimodalOut):
                                 new_output = BatchMultimodalOut(
                                     rids=[output.rids[i]],
@@ -198,59 +201,10 @@ class DetokenizerManager:
                                 else:
                                     raise RuntimeError(f"Worker {worker_id} not found after reloading mapping")
                         else:
-                            # Worker not found in mapping, reload and retry
-                            print(f"Worker {worker_id} not found in mapping, reloading...")
-                            self._load_tokenizer_mapping()
-                            if worker_id in self.tokenizer_mapping:
-                                # Retry the same logic for this worker
-                                if isinstance(output, BatchEmbeddingOut):
-                                    new_output = BatchEmbeddingOut(
-                                        rids=[output.rids.split('_')[0]],
-                                        finished_reasons=[output.finished_reasons[i]],
-                                        embeddings=[output.embeddings[i]],
-                                        prompt_tokens=[output.prompt_tokens[i]],
-                                        cached_tokens=[output.cached_tokens[i]]
-                                    )
-                                elif isinstance(output, BatchStrOut):
-                                    new_output = BatchStrOut(
-                                        rids=[output.rids[i]],
-                                        finished_reasons=[output.finished_reasons[i]] if len(output.finished_reasons)>i else None,
-                                        output_strs=[output.output_strs[i]] if len(output.output_strs)>i else None,
-                                        output_ids=[output.output_ids[i]] if output.output_ids and len(output.output_ids) > i else None,
-                                        prompt_tokens=[output.prompt_tokens[i]] if len(output.prompt_tokens) > i else None,
-                                        completion_tokens=[output.completion_tokens[i]] if len(output.completion_tokens) > i else None,
-                                        cached_tokens=[output.cached_tokens[i]] if len(output.cached_tokens) > i else None,
-                                        spec_verify_ct=[output.spec_verify_ct[i]] if len(output.spec_verify_ct) > i else None,
-                                        input_token_logprobs_val=[output.input_token_logprobs_val[i]] if output.input_token_logprobs_val else None,
-                                        input_token_logprobs_idx=[output.input_token_logprobs_idx[i]] if output.input_token_logprobs_idx else None,
-                                        output_token_logprobs_val=[output.output_token_logprobs_val[i]] if output.output_token_logprobs_val else None,
-                                        output_token_logprobs_idx=[output.output_token_logprobs_idx[i]] if output.output_token_logprobs_idx else None,
-                                        input_top_logprobs_val=[output.input_top_logprobs_val[i]] if output.input_top_logprobs_val else None,
-                                        input_top_logprobs_idx=[output.input_top_logprobs_idx[i]] if output.input_top_logprobs_idx else None,
-                                        output_top_logprobs_val=[output.output_top_logprobs_val[i]] if output.output_top_logprobs_val else None,
-                                        output_top_logprobs_idx=[output.output_top_logprobs_idx[i]] if output.output_top_logprobs_idx else None,
-                                        input_token_ids_logprobs_val=[output.input_token_ids_logprobs_val[i]] if output.input_token_ids_logprobs_val else None,
-                                        input_token_ids_logprobs_idx=[output.input_token_ids_logprobs_idx[i]] if output.input_token_ids_logprobs_idx else None,
-                                        output_token_ids_logprobs_val=[output.output_token_ids_logprobs_val[i]] if output.output_token_ids_logprobs_val else None,
-                                        output_token_ids_logprobs_idx=[output.output_token_ids_logprobs_idx[i]] if output.output_token_ids_logprobs_idx else None,
-                                        output_hidden_states=[output.output_hidden_states[i]] if output.output_hidden_states else None
-                                    )
-                                elif isinstance(output, BatchMultimodalOut):
-                                    new_output = BatchMultimodalOut(
-                                        rids=[output.rids[i]],
-                                        finished_reasons=[output.finished_reasons[i]],
-                                        prompt_tokens=[output.prompt_tokens[i]],
-                                        completion_tokens=[output.completion_tokens[i]],
-                                        cached_tokens=[output.cached_tokens[i]]
-                                    )
-                                else:
-                                    new_output = output
-                                self.tokenizer_mapping[worker_id].send_pyobj(new_output)
-                            else:
-                                raise RuntimeError(
-                                    f"Socket not found for worker_id={worker_id}. "
-                                    f"Available worker_ids: {list(self.tokenizer_mapping.keys())}"
-                                )
+                            raise RuntimeError(
+                                f"Socket not found for worker_id={worker_id}. "
+                                f"Available worker_ids: {list(self.tokenizer_mapping.keys())}"
+                            )
             except Exception as e:
                 print(f"Error in detokenizer event loop: {e}")
                 # If it's a ZMQ error, try to reload mapping
