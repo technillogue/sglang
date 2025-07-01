@@ -739,7 +739,6 @@ class Scheduler(
         """A normal scheduler loop."""
         while True:
             recv_reqs = self.recv_requests()
-            print(f"event_loop_normal recv_reqs:{recv_reqs}")
             self.process_input_requests(recv_reqs)
 
             batch = self.get_next_batch_to_run()
