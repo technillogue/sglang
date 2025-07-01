@@ -1288,14 +1288,15 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
             )
         )
-
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
+
     # Stop profiler
     if profile:
         print("Stopping profiler...")
         profile_output = await async_request_profile(api_url=base_url + "/stop_profile")
         if profile_output.success:
             print("Profiler stopped")
+
     if pbar is not None:
         pbar.close()
 
