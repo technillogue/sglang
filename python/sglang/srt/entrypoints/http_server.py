@@ -1153,7 +1153,7 @@ def launch_server(
             args=(
                 server_args,
                 pipe_finish_writer,
-                image_token_text,
+                _global_state.tokenizer_manager.image_token_id,
                 launch_callback,
             ),
         )
