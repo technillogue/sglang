@@ -64,8 +64,8 @@ from sglang.srt.hf_transformers_utils import (
     get_tokenizer_from_processor,
 )
 from sglang.srt.managers.detokenizer_manager import (
-    read_from_shared_memory,
     deserialize_tokenizer_mapping,
+    read_from_shared_memory,
 )
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -133,7 +133,6 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 logger = logging.getLogger(__name__)
 
 
-
 @dataclasses.dataclass
 class ReqState:
     """Store the state a request."""
@@ -178,7 +177,7 @@ class TokenizerManager:
         self,
         server_args: ServerArgs,
         port_args: PortArgs,
-        is_main: Optional[bool]= True,
+        is_main: Optional[bool] = True,
     ):
         # Parse args
         self.server_args = server_args
@@ -227,8 +226,8 @@ class TokenizerManager:
                 )
         else:
             self.send_to_scheduler = get_zmq_socket(
-                    context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
-                )
+                context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+            )
 
         self.worker_id = os.getpid()
         # Read model args
@@ -366,7 +365,7 @@ class TokenizerManager:
             self.send_to_scheduler, server_args.dp_size, server_args
         )
         self.health_check_communitcator = _Communicator(
-          self.send_to_scheduler, 1, server_args
+            self.send_to_scheduler, 1, server_args
         )
         self.get_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size, server_args
@@ -454,7 +453,6 @@ class TokenizerManager:
             ]
         )
 
-
         # For pd disaggregtion
         self.disaggregation_mode = DisaggregationMode(
             self.server_args.disaggregation_mode
@@ -498,7 +496,6 @@ class TokenizerManager:
                 "Please add `--is-embedding` when launching the server or try another model."
             )
 
-
         obj.normalize_batch_and_arguments()
 
         # Modify rid, add worker_id
@@ -508,7 +505,7 @@ class TokenizerManager:
         else:
             # If it's a single value, add worker_id prefix
             obj.rid = f"{self.worker_id}_{obj.rid}"
-        
+
         if isinstance(obj, GenerateReqInput):
             return_hidden_states = obj.return_hidden_states
             has_return_hidden_states = return_hidden_states == True or (
@@ -522,7 +519,6 @@ class TokenizerManager:
                     "return_hidden_states=True requires the server to be started "
                     "with --enable-return-hidden-states (ServerArgs.enable_return_hidden_states)."
                 )
-
 
         if self.log_requests:
             max_length, skip_names, _ = self.log_request_metadata
@@ -1413,7 +1409,7 @@ class TokenizerManager:
         while True:
             recv_obj = await self.recv_from_detokenizer.recv_pyobj()
             # In multi-worker mode, distribute results to corresponding workers
-            if self.server_args.worker_num > 1 and  self.is_main:
+            if self.server_args.worker_num > 1 and self.is_main:
                 await self._distribute_result_to_workers(recv_obj)
             else:
                 # In single worker mode, process directly
@@ -1430,32 +1426,42 @@ class TokenizerManager:
         for retry in range(max_retries):
             try:
                 # Read tokenizer mapping information
-                tokenizer_mapping_data = read_from_shared_memory(f"tokenizer_mapping_{main_pid}")
+                tokenizer_mapping_data = read_from_shared_memory(
+                    f"tokenizer_mapping_{main_pid}"
+                )
                 ipc_mapping = deserialize_tokenizer_mapping(tokenizer_mapping_data)
                 print(f"Main TokenizerManager loaded tokenizer mapping: {ipc_mapping}")
 
                 # Check if worker count matches
                 if len(ipc_mapping) >= self.server_args.worker_num:
                     # Initialize tokenizer_mapping if not exists
-                    if not hasattr(self, 'tokenizer_mapping'):
+                    if not hasattr(self, "tokenizer_mapping"):
                         self.tokenizer_mapping = {}
 
                     # Create ZMQ context if needed
-                    if not hasattr(self, '_zmq_context'):
+                    if not hasattr(self, "_zmq_context"):
                         self._zmq_context = zmq.Context()
 
                     # Create ZMQ socket for each worker (only if not already exists)
                     for worker_id, ipc_name in ipc_mapping.items():
                         worker_id_int = int(worker_id)
                         if worker_id_int not in self.tokenizer_mapping:
-                            socket = get_zmq_socket(self._zmq_context, zmq.PUSH, ipc_name, False)
+                            socket = get_zmq_socket(
+                                self._zmq_context, zmq.PUSH, ipc_name, False
+                            )
                             self.tokenizer_mapping[worker_id_int] = socket
-                            print(f"Created ZMQ socket for worker {worker_id} with ipc_name {ipc_name}")
+                            print(
+                                f"Created ZMQ socket for worker {worker_id} with ipc_name {ipc_name}"
+                            )
                         else:
-                            print(f"ZMQ socket for worker {worker_id} already exists, skipping creation")
+                            print(
+                                f"ZMQ socket for worker {worker_id} already exists, skipping creation"
+                            )
                     break  # Successfully loaded all workers, exit retry loop
                 else:
-                    print(f"Waiting for all workers to register... Current: {len(ipc_mapping)}/{self.server_args.worker_num}")
+                    print(
+                        f"Waiting for all workers to register... Current: {len(ipc_mapping)}/{self.server_args.worker_num}"
+                    )
                     if retry < max_retries - 1:
                         time.sleep(retry_interval)
                     else:
@@ -1466,32 +1472,36 @@ class TokenizerManager:
                         )
             except Exception as e:
                 if retry < max_retries - 1:
-                    print(f"Failed to load tokenizer mapping, retrying in {retry_interval} seconds: {e}")
+                    print(
+                        f"Failed to load tokenizer mapping, retrying in {retry_interval} seconds: {e}"
+                    )
                     time.sleep(retry_interval)
                 else:
-                    raise RuntimeError(f"Failed to load tokenizer mapping after {max_retries} retries: {e}")
+                    raise RuntimeError(
+                        f"Failed to load tokenizer mapping after {max_retries} retries: {e}"
+                    )
 
     async def _distribute_result_to_workers(self, recv_obj):
         """Distribute result to corresponding workers based on rid"""
-        if not hasattr(self, 'tokenizer_mapping') or not self.tokenizer_mapping:
+        if not hasattr(self, "tokenizer_mapping") or not self.tokenizer_mapping:
             print("Tokenizer mapping not available, reloading...")
             self._load_tokenizer_mapping()
 
         # Extract worker_id from rid
         if isinstance(recv_obj.rids, list):
-            worker_ids = [int(rid.split('_')[0]) for rid in recv_obj.rids]
+            worker_ids = [int(rid.split("_")[0]) for rid in recv_obj.rids]
         elif isinstance(recv_obj.rids, str):
-            worker_ids = [int(recv_obj.rids.split('_')[0])]
+            worker_ids = [int(recv_obj.rids.split("_")[0])]
         else:
             raise RuntimeError(f"recv_obj.rids is not list")
 
         # Distribute result to each worker
         for i, worker_id in enumerate(worker_ids):
-            if not isinstance(recv_obj,(BatchTokenIDOut,BatchEmbeddingOut)):
+            if not isinstance(recv_obj, (BatchTokenIDOut, BatchEmbeddingOut)):
                 if worker_id not in self.tokenizer_mapping:
                     # Worker not found in mapping, reload and retry
                     print(f"Worker {worker_id} not found in mapping, reloading...")
-                    self._load_tokenizer_mapping()    
+                    self._load_tokenizer_mapping()
                 if worker_id in self.tokenizer_mapping:
                     # Send to worker
                     self.tokenizer_mapping[worker_id].send_pyobj(recv_obj)
@@ -1503,46 +1513,160 @@ class TokenizerManager:
             else:
                 # if skip tokenizer init = true，this part will be run
                 if worker_id not in self.tokenizer_mapping:
-                    raise RuntimeError(
-                        f"socket not found for worker_id: {worker_id}"
-                    )
+                    raise RuntimeError(f"socket not found for worker_id: {worker_id}")
                 else:
                     if isinstance(recv_obj, BatchTokenIDOut):
                         new_recv_obj = BatchTokenIDOut(
                             [recv_obj.rids[i]],
-                            [recv_obj.finished_reasons[i]] if len(recv_obj.finished_reasons)>i else None,
-                            [recv_obj.decoded_texts[i]] if len(recv_obj.decoded_texts)>i else None,
-                            [recv_obj.decode_ids[i]] if len(recv_obj.decode_ids)>i else None,
-                            [recv_obj.read_offsets[i]] if len(recv_obj.read_offsets)>i else None,
-                            [recv_obj.output_ids[i]] if recv_obj.output_ids and len(recv_obj.output_ids) > i else None,
-                            [recv_obj.skip_special_tokens[i]] if len(recv_obj.skip_special_tokens) > i else None,
-                            [recv_obj.spaces_between_special_tokens[i]] if len(recv_obj.spaces_between_special_tokens) > i else None,
-                            [recv_obj.no_stop_trim[i]] if len(recv_obj.no_stop_trim) > i else None,
-                            [recv_obj.prompt_tokens[i]] if len(recv_obj.prompt_tokens) > i else None,
-                            [recv_obj.completion_tokens[i]] if len(recv_obj.completion_tokens) > i else None,
-                            [recv_obj.cached_tokens[i]] if len(recv_obj.cached_tokens) > i else None,
-                            [recv_obj.spec_verify_ct[i]] if len(recv_obj.spec_verify_ct) > i else None,
-                            [recv_obj.input_token_logprobs_val[i]] if recv_obj.input_token_logprobs_val else None,
-                            [recv_obj.input_token_logprobs_idx[i]] if recv_obj.input_token_logprobs_idx else None,
-                            [recv_obj.output_token_logprobs_val[i]] if recv_obj.output_token_logprobs_val else None,
-                            [recv_obj.output_token_logprobs_idx[i]] if recv_obj.output_token_logprobs_idx else None,
-                            [recv_obj.input_top_logprobs_val[i]] if recv_obj.input_top_logprobs_val else None,
-                            [recv_obj.input_top_logprobs_idx[i]] if recv_obj.input_top_logprobs_idx else None,
-                            [recv_obj.output_top_logprobs_val[i]] if recv_obj.output_top_logprobs_val else None,
-                            [recv_obj.output_top_logprobs_idx[i]] if recv_obj.output_top_logprobs_idx else None,
-                            [recv_obj.input_token_ids_logprobs_val[i]] if recv_obj.input_token_ids_logprobs_val else None,
-                            [recv_obj.input_token_ids_logprobs_idx[i]] if recv_obj.input_token_ids_logprobs_idx else None,
-                            [recv_obj.output_token_ids_logprobs_val[i]] if recv_obj.output_token_ids_logprobs_val else None,
-                            [recv_obj.output_token_ids_logprobs_idx[i]] if recv_obj.output_token_ids_logprobs_idx else None,
-                            [recv_obj.output_hidden_states[i]] if recv_obj.output_hidden_states else None 
+                            (
+                                [recv_obj.finished_reasons[i]]
+                                if len(recv_obj.finished_reasons) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.decoded_texts[i]]
+                                if len(recv_obj.decoded_texts) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.decode_ids[i]]
+                                if len(recv_obj.decode_ids) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.read_offsets[i]]
+                                if len(recv_obj.read_offsets) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_ids[i]]
+                                if recv_obj.output_ids and len(recv_obj.output_ids) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.skip_special_tokens[i]]
+                                if len(recv_obj.skip_special_tokens) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.spaces_between_special_tokens[i]]
+                                if len(recv_obj.spaces_between_special_tokens) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.no_stop_trim[i]]
+                                if len(recv_obj.no_stop_trim) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.prompt_tokens[i]]
+                                if len(recv_obj.prompt_tokens) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.completion_tokens[i]]
+                                if len(recv_obj.completion_tokens) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.cached_tokens[i]]
+                                if len(recv_obj.cached_tokens) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.spec_verify_ct[i]]
+                                if len(recv_obj.spec_verify_ct) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.input_token_logprobs_val[i]]
+                                if recv_obj.input_token_logprobs_val
+                                else None
+                            ),
+                            (
+                                [recv_obj.input_token_logprobs_idx[i]]
+                                if recv_obj.input_token_logprobs_idx
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_token_logprobs_val[i]]
+                                if recv_obj.output_token_logprobs_val
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_token_logprobs_idx[i]]
+                                if recv_obj.output_token_logprobs_idx
+                                else None
+                            ),
+                            (
+                                [recv_obj.input_top_logprobs_val[i]]
+                                if recv_obj.input_top_logprobs_val
+                                else None
+                            ),
+                            (
+                                [recv_obj.input_top_logprobs_idx[i]]
+                                if recv_obj.input_top_logprobs_idx
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_top_logprobs_val[i]]
+                                if recv_obj.output_top_logprobs_val
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_top_logprobs_idx[i]]
+                                if recv_obj.output_top_logprobs_idx
+                                else None
+                            ),
+                            (
+                                [recv_obj.input_token_ids_logprobs_val[i]]
+                                if recv_obj.input_token_ids_logprobs_val
+                                else None
+                            ),
+                            (
+                                [recv_obj.input_token_ids_logprobs_idx[i]]
+                                if recv_obj.input_token_ids_logprobs_idx
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_token_ids_logprobs_val[i]]
+                                if recv_obj.output_token_ids_logprobs_val
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_token_ids_logprobs_idx[i]]
+                                if recv_obj.output_token_ids_logprobs_idx
+                                else None
+                            ),
+                            (
+                                [recv_obj.output_hidden_states[i]]
+                                if recv_obj.output_hidden_states
+                                else None
+                            ),
                         )
                     else:
-                        new_recv_obj= BatchEmbeddingOut(
+                        new_recv_obj = BatchEmbeddingOut(
                             [recv_obj.rids[i]],
-                            [recv_obj.finished_reasons[i]] if len(recv_obj.finished_reasons) > i else None,
-                            [recv_obj.embeddings[i]] if len(recv_obj.embeddings) > i else None,
-                            [recv_obj.prompt_tokens[i]] if len(recv_obj.prompt_tokens) > i else None,
-                            [recv_obj.cached_tokens[i]] if len(recv_obj.cached_tokens) > i else None,
+                            (
+                                [recv_obj.finished_reasons[i]]
+                                if len(recv_obj.finished_reasons) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.embeddings[i]]
+                                if len(recv_obj.embeddings) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.prompt_tokens[i]]
+                                if len(recv_obj.prompt_tokens) > i
+                                else None
+                            ),
+                            (
+                                [recv_obj.cached_tokens[i]]
+                                if len(recv_obj.cached_tokens) > i
+                                else None
+                            ),
                         )
                     try:
                         self.tokenizer_mapping[worker_id].send_pyobj(new_recv_obj)
@@ -2019,7 +2143,11 @@ class _Communicator(Generic[T]):
             assert self._result_values is None
 
         if obj:
-            if self._server_args and self._server_args.worker_num > 1 and obj.rids is None:
+            if (
+                self._server_args
+                and self._server_args.worker_num > 1
+                and obj.rids is None
+            ):
                 obj.rids = f"{os.getpid()}_{uuid.uuid4().hex}_Communicator"
             self._sender.send_pyobj(obj)
 
