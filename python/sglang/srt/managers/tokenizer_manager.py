@@ -312,12 +312,13 @@ class TokenizerManager:
         # Start kv boostrap server on prefill
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             # only start bootstrap server on prefill tm
-            kv_bootstrap_server_class = get_kv_class(
-                self.disaggregation_transfer_backend, KVClassType.BOOTSTRAP_SERVER
-            )
-            self.bootstrap_server = kv_bootstrap_server_class(
-                self.server_args.disaggregation_bootstrap_port
-            )
+            if self.is_main:
+                kv_bootstrap_server_class = get_kv_class(
+                    self.disaggregation_transfer_backend, KVClassType.BOOTSTRAP_SERVER
+                )
+                self.bootstrap_server = kv_bootstrap_server_class(
+                    self.server_args.disaggregation_bootstrap_port
+                )
 
         # For load balancing
         self.current_load = 0
@@ -452,26 +453,6 @@ class TokenizerManager:
                 (HealthCheckOutput, lambda x: None),
             ]
         )
-
-        # For pd disaggregtion
-        self.disaggregation_mode = DisaggregationMode(
-            self.server_args.disaggregation_mode
-        )
-        self.transfer_backend = TransferBackend(
-            self.server_args.disaggregation_transfer_backend
-        )
-        # Start kv boostrap server on prefill
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            # only start bootstrap server on prefill tm
-            kv_bootstrap_server_class = get_kv_class(
-                self.transfer_backend, KVClassType.BOOTSTRAP_SERVER
-            )
-            self.bootstrap_server = kv_bootstrap_server_class(
-                self.server_args.disaggregation_bootstrap_port
-            )
-
-        self.current_load = 0
-        self.current_load_lock = asyncio.Lock()
 
     def _run_loop(self):
         self._loop.run_forever()
@@ -1430,7 +1411,9 @@ class TokenizerManager:
                     f"tokenizer_mapping_{main_pid}"
                 )
                 ipc_mapping = deserialize_tokenizer_mapping(tokenizer_mapping_data)
-                logger.info(f"Main TokenizerManager loaded tokenizer mapping: {ipc_mapping}")
+                logger.info(
+                    f"Main TokenizerManager loaded tokenizer mapping: {ipc_mapping}"
+                )
 
                 # Check if worker count matches
                 if len(ipc_mapping) >= self.server_args.worker_num:
@@ -1500,7 +1483,9 @@ class TokenizerManager:
             if not isinstance(recv_obj, (BatchTokenIDOut, BatchEmbeddingOut)):
                 if worker_id not in self.tokenizer_mapping:
                     # Worker not found in mapping, reload and retry
-                    logger.info(f"Worker {worker_id} not found in mapping, reloading...")
+                    logger.info(
+                        f"Worker {worker_id} not found in mapping, reloading..."
+                    )
                     self._load_tokenizer_mapping()
                 if worker_id in self.tokenizer_mapping:
                     # Send to worker
