@@ -143,7 +143,7 @@ class DetokenizerManager:
                     for i, worker_id in enumerate(worker_ids):
                         if worker_id not in self.tokenizer_mapping:
                             # Worker not found in mapping, reload and retry
-                            print(
+                            logger.info(
                                 f"Worker {worker_id} not found in mapping, reloading..."
                             )
                             self._load_tokenizer_mapping()
@@ -276,7 +276,7 @@ class DetokenizerManager:
                             try:
                                 self.tokenizer_mapping[worker_id].send_pyobj(new_output)
                             except zmq.error.ZMQError as e:
-                                print(
+                                logger.info(
                                     f"ZMQ error when sending to worker {worker_id}: {e}"
                                 )
                                 # Worker might have restarted, reload mapping
@@ -296,10 +296,10 @@ class DetokenizerManager:
                                 f"Available worker_ids: {list(self.tokenizer_mapping.keys())}"
                             )
             except Exception as e:
-                print(f"Error in detokenizer event loop: {e}")
+                logger.error(f"Error in detokenizer event loop: {e}")
                 # If it's a ZMQ error, try to reload mapping
                 if "ZMQ" in str(e) and self.worker_num > 1:
-                    print(
+                    logger.info(
                         "ZMQ error detected, attempting to reload tokenizer mapping..."
                     )
                     self._load_tokenizer_mapping()
@@ -319,7 +319,7 @@ class DetokenizerManager:
                     f"tokenizer_mapping_{main_pid}"
                 )
                 ipc_mapping = deserialize_tokenizer_mapping(tokenizer_mapping_data)
-                print(f"Detokenizer loaded tokenizer mapping: {ipc_mapping}")
+                logger.info(f"Detokenizer loaded tokenizer mapping: {ipc_mapping}")
 
                 # Check if worker count matches
                 if len(ipc_mapping) >= self.worker_num:
@@ -339,16 +339,16 @@ class DetokenizerManager:
                                 self._zmq_context, zmq.PUSH, ipc_name, False
                             )
                             self.tokenizer_mapping[worker_id_int] = socket
-                            print(
+                            logger.info(
                                 f"Created ZMQ socket for worker {worker_id} with ipc_name {ipc_name}"
                             )
                         else:
-                            print(
+                            logger.info(
                                 f"ZMQ socket for worker {worker_id} already exists, skipping creation"
                             )
                     break  # Successfully loaded all workers, exit retry loop
                 else:
-                    print(
+                    logger.info(
                         f"Waiting for all workers to register... Current: {len(ipc_mapping)}/{self.worker_num}"
                     )
                     if retry < max_retries - 1:
@@ -361,7 +361,7 @@ class DetokenizerManager:
                         )
             except Exception as e:
                 if retry < max_retries - 1:
-                    print(
+                    logger.info(
                         f"Failed to load tokenizer mapping, retrying in {retry_interval} seconds: {e}"
                     )
                     time.sleep(retry_interval)

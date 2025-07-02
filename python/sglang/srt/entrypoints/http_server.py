@@ -232,7 +232,7 @@ def update_tokenizer_mapping(
 
         # Update the mapping
         mapping[worker_id] = ipc_name
-        print(f"worker_id:{worker_id}, mapping:{mapping}")
+        logger.info(f"worker_id:{worker_id}, mapping:{mapping}")
 
         # Write to shared memory
         shm = write_to_shared_memory(
@@ -277,31 +277,15 @@ async def lifespan(fast_api_app: FastAPI):
     else:
         pid = os.getpid()
         main_pid = get_main_process_id()
-        print(f"current worker_id: {pid}, main processID: {main_pid}")
+        logger.info(f"current worker_id: {pid}, main processID: {main_pid}")
 
         # Read port_args, server_args, and scheduler_info from shared memory
-        max_retries = 5
-        retry_delay = 1  # seconds
-
-        for retry in range(max_retries):
-            try:
-                port_args_data = read_from_shared_memory(f"port_args_{main_pid}")
-                server_args_data = read_from_shared_memory(f"server_args_{main_pid}")
-                scheduler_info_data = read_from_shared_memory(
-                    f"scheduler_info_{main_pid}"
-                )
-                lock_data = read_from_shared_memory(f"mapping_lock_{main_pid}")
-                # template_manager_data = read_from_shared_memory(f"tempalte_manager_{main_pid}")
-                break
-            except FileNotFoundError as e:
-                if retry < max_retries - 1:
-                    print(
-                        f"Waiting for shared memory to be ready, retry {retry + 1}/{max_retries}"
-                    )
-                    time.sleep(retry_delay)
-                else:
-                    raise Exception(f"Unable to access shared memory: {e}")
-
+        port_args_data = read_from_shared_memory(f"port_args_{main_pid}")
+        server_args_data = read_from_shared_memory(f"server_args_{main_pid}")
+        scheduler_info_data = read_from_shared_memory(
+            f"scheduler_info_{main_pid}"
+        )
+        lock_data = read_from_shared_memory(f"mapping_lock_{main_pid}")
         lock_value = Value(ctypes.c_int, lock_data["lock_value"])
 
         port_args = deserialize_port_args(port_args_data)
@@ -355,7 +339,7 @@ async def lifespan(fast_api_app: FastAPI):
             _global_state.tokenizer_manager
         )
 
-        print(f"mapping_length={mapping_len},worker_num={server_args.worker_num}")
+        logger.info(f"mapping_length={mapping_len},worker_num={server_args.worker_num}")
         # Check if all workers have registered
 
         if server_args.warmups is not None:
@@ -369,7 +353,6 @@ async def lifespan(fast_api_app: FastAPI):
         # wait for detokenizer manager to register zmq
         time.sleep(12)
         logger.info("warmup_thread start")
-        print(f"warmup_thread start")
 
         # Create a warmup thread for each worker
         # if mapping_len == server_args.worker_num:
@@ -382,15 +365,15 @@ async def lifespan(fast_api_app: FastAPI):
                 None,  # launch_callback not needed in worker
             ),
         )
-        print(f"warmup_thread start warmup_thread={warmup_thread}")
+        logger.info(f"warmup_thread start warmup_thread={warmup_thread}")
         warmup_thread.start()
 
-        print(f"worker {pid} started")
+        logger.info(f"worker {pid} started")
     try:
         yield
     finally:
         if server_args.worker_num > 1:
-            print(f"worker {pid} ending")
+            logger.info(f"worker {pid} ending")
             # Clean up shared memory
             try:
                 if "warmup_thread" in locals() and warmup_thread.is_alive():
@@ -407,8 +390,8 @@ async def lifespan(fast_api_app: FastAPI):
                     except FileNotFoundError:
                         pass
             except Exception as e:
-                print(f"Error when cleaning up shared memory: {e}")
-            print(f"worker {pid} ended")
+                logger.error(f"Error when cleaning up shared memory: {e}")
+            logger.info(f"worker {pid} ended")
 
 
 # Fast API
@@ -1170,6 +1153,8 @@ def launch_server(
         lock_shm.close()
         # template_manager_shm.close()
     else:
+        # Send a warmup request - we will create the thread launch it
+        # in the lifespan after all other warmups have fired.
         warmup_thread = threading.Thread(
             target=_wait_and_warmup,
             args=(
@@ -1189,19 +1174,6 @@ def launch_server(
     if server_args.enable_metrics:
         add_prometheus_middleware(app)
         enable_func_timer()
-
-    # # Send a warmup request - we will create the thread launch it
-    # # in the lifespan after all other warmups have fired.
-    # warmup_thread = threading.Thread(
-    #     target=_wait_and_warmup,
-    #     args=(
-    #         server_args,
-    #         pipe_finish_writer,
-    #         _global_state.tokenizer_manager.image_token_id,
-    #         launch_callback,
-    #     ),
-    # )
-    # app.warmup_thread = warmup_thread
 
     try:
         # Update logging configs
