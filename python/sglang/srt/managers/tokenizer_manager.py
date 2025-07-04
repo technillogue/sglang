@@ -1563,10 +1563,7 @@ class TokenizerManager:
             else 0
         )
 
-        if (
-            state.first_token_time == 0.0
-            and self.disaggregation_mode != DisaggregationMode.PREFILL
-        ):
+        if  state.first_token_time == 0.0:
             state.first_token_time = state.last_time = time.time()
             state.last_completion_tokens = completion_tokens
             self.metrics_collector.observe_time_to_first_token(
