@@ -815,7 +815,7 @@ class SchedulerDisaggregationDecodeMixin:
             last_time = time.perf_counter()
 
     def _prepare_idle_batch_and_run(self: Scheduler, batch, delay_process=False):
-        batch, _ = self.prepare_mlp_sync_batch(batch)
+        batch = self.prepare_mlp_sync_batch(batch)
         result = None
         if batch:
             result = self.run_batch(batch)
