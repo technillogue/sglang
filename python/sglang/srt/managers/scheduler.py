@@ -1084,7 +1084,7 @@ class Scheduler(
                 data_parallel_rank=recv_req.data_parallel_rank,
             )
             req.tokenizer = self.tokenizer
-
+            print(f"2: hi handle generate recv!!! {recv_req.rid}")
             if self.disaggregation_mode != DisaggregationMode.NULL:
                 # Invalid request for disaggregated mode
                 if recv_req.bootstrap_room is None:

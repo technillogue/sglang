@@ -645,7 +645,8 @@ class DecodeTransferQueue:
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
-        print(f"[{datetime.now()}]  Transferred reqs id: {[req.rid for req in transferred_reqs]}")
+        if transferred_reqs:
+            print(f"[{datetime.now()}]  Transferred reqs id: {[req.rid for req in transferred_reqs]}")
         return transferred_reqs
 
 
@@ -703,9 +704,6 @@ class SchedulerDisaggregationDecodeMixin:
 
         last_time = time.perf_counter()
         while True:
-            lt = time.perf_counter() - last_time
-            if lt >1:
-                print("loop_overlap_disagg_decode time is ", lt )
             recv_reqs = self.recv_requests()
             if len(recv_reqs) > 0:
                 print(f"[{datetime.now()}]  Scheduler Recv reqs: {[req.rid for req in recv_reqs]}")
@@ -811,6 +809,9 @@ class SchedulerDisaggregationDecodeMixin:
 
             self.last_batch = batch
             self.last_batch_in_queue = last_batch_in_queue
+            lt = time.perf_counter() - last_time
+            if lt >1:
+                print("loop_overlap_disagg_decode time is ", lt )
             last_time = time.perf_counter()
 
     def _prepare_idle_batch_and_run(self: Scheduler, batch, delay_process=False):
