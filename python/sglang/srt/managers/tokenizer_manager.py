@@ -424,7 +424,7 @@ class TokenizerManager:
         created_time = time.time()
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
-        print(f"##genrate {obj.rid}")
+        print(f"[{datetime.now()}]  ##genrate {obj.rid}")
         if isinstance(obj, EmbeddingReqInput) and self.is_generation:
             raise ValueError(
                 "This model does not appear to be an embedding model by default. "
@@ -692,7 +692,7 @@ class TokenizerManager:
         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
         created_time: Optional[float] = None,
     ):
-        print(f"0....hi: send to schedule rid: {obj.rid}")
+        print(f"[{datetime.now()}]  0....hi: send to schedule rid: {obj.rid}")
         self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
         self.rid_to_state[obj.rid] = state
