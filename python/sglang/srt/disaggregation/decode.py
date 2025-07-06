@@ -703,7 +703,9 @@ class SchedulerDisaggregationDecodeMixin:
 
         last_time = time.perf_counter()
         while True:
-            print("loop_overlap_disagg_decode time is ", time.perf_counter() - last_time)
+            lt = time.perf_counter() - last_time
+            if lt >1:
+                print("loop_overlap_disagg_decode time is ", lt )
             recv_reqs = self.recv_requests()
             if len(recv_reqs) > 0:
                 print(f"[{datetime.now()}]  Scheduler Recv reqs: {[req.rid for req in recv_reqs]}")
@@ -711,11 +713,14 @@ class SchedulerDisaggregationDecodeMixin:
             s = time.perf_counter()
             self.process_input_requests(recv_reqs)
             e = time.perf_counter()
-            print("process_input_requests time: ", e - s)
+            if e-s >1:
+                print("process_input_requests time: ", e - s)
 
             # polling and allocating kv cache
             self.process_decode_queue()
-            print("Process_decode_queue time: ", time.perf_counter() - e)
+            tt = time.perf_counter() - e
+            if tt > 1:
+                print("Process_decode_queue time: ", tt)
 
             batch = self.get_next_disagg_decode_batch_to_run()
             self.cur_batch = batch
@@ -735,7 +740,9 @@ class SchedulerDisaggregationDecodeMixin:
                         batch_, result = self._prepare_idle_batch_and_run(
                             None, delay_process=True
                         )
-                        print("0. prepare_idle_batch_and_run perf time: ", time.perf_counter() - tic)
+                        ttt = time.perf_counter() - tic
+                        if ttt > 1:
+                            print("0. prepare_idle_batch_and_run perf time: ", time.perf_counter() - tic)
                         if batch_:
                             result_queue.append((batch_.copy(), result))
                             last_batch_in_queue = True
@@ -743,7 +750,10 @@ class SchedulerDisaggregationDecodeMixin:
                     if prepare_mlp_sync_flag:
                         tic = time.perf_counter()
                         self.prepare_mlp_sync_batch(batch)
-                        print("1.prepare_mlp_sync_batch perf time: ", time.perf_counter() - tic)
+                        ttt = time.perf_counter() - tic
+                        if ttt > 1:
+                            print("1.prepare_mlp_sync_batch perf time: ", ttt)
+
                     result = self.run_batch(batch)
                     result_queue.append((batch.copy(), result))
 
@@ -757,7 +767,9 @@ class SchedulerDisaggregationDecodeMixin:
                         )
                         tic2 = time.perf_counter()
                         self.set_next_batch_sampling_info_done(tmp_batch)
-                        print("3.set_next_batch_sampling_info_done perf time: ", time.perf_counter() - tic2)
+                        tt = time.perf_counter() - tic2
+                        if tt > 1:
+                            print("3.set_next_batch_sampling_info_done perf time: ",tt )
 
                     last_batch_in_queue = True
 
@@ -766,7 +778,9 @@ class SchedulerDisaggregationDecodeMixin:
                 batch, result = self._prepare_idle_batch_and_run(
                     None, delay_process=True
                 )
-                print("2._prepare_idle_batch_and_run perf time: ", time.perf_counter() - tic)
+                ttt = time.perf_counter() - tic
+                if ttt > 1:
+                    print("2._prepare_idle_batch_and_run perf time: ", time.perf_counter() - tic)
 
                 if batch:
                     result_queue.append((batch.copy(), result))
@@ -780,7 +794,9 @@ class SchedulerDisaggregationDecodeMixin:
                     self.tp_worker.cur_sampling_info if batch else None
                 )
                 self.process_batch_result(tmp_batch, tmp_result)
-                print("4.process_batch_result perf time: ", time.perf_counter()-tt)
+                ttt = time.perf_counter() - tt
+                if ttt >1:
+                    print("4.process_batch_result perf time: ", time.perf_counter()-tt)
 
             if batch is None and (
                 len(self.waiting_queue)
