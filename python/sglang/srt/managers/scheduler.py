@@ -23,6 +23,7 @@ import time
 from collections import defaultdict, deque
 from concurrent import futures
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple, Union
@@ -1208,6 +1209,7 @@ class Scheduler(
                 req, self.model_config.num_key_value_heads
             )
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            print(f"[{datetime.now()}]  req {req.rid} added to disagg_decode_prealloc_queue")
             self.disagg_decode_prealloc_queue.add(req)
         else:
             self.waiting_queue.append(req)

@@ -21,8 +21,10 @@ Life cycle of a request in the decode server
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
@@ -643,7 +645,7 @@ class DecodeTransferQueue:
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
-
+        print(f"[{datetime.now()}]  Transferred reqs id: {[req.rid for req in transferred_reqs]}")
         return transferred_reqs
 
 
@@ -699,11 +701,22 @@ class SchedulerDisaggregationDecodeMixin:
         self.last_batch: Optional[ScheduleBatch] = None
         self.last_batch_in_queue = False  # last batch is modified in-place, so we need another variable to track if it's extend
 
+        last_time = time.perf_counter()
         while True:
+            print("loop_overlap_disagg_decode time is ", time.perf_counter() - last_time)
             recv_reqs = self.recv_requests()
+            if len(recv_reqs) > 0:
+                print(f"[{datetime.now()}]  Scheduler Recv reqs: {[req.rid for req in recv_reqs]}")
+
+            s = time.perf_counter()
             self.process_input_requests(recv_reqs)
+            e = time.perf_counter()
+            print("process_input_requests time: ", e - s)
+
             # polling and allocating kv cache
             self.process_decode_queue()
+            print("Process_decode_queue time: ", time.perf_counter() - e)
+
             batch = self.get_next_disagg_decode_batch_to_run()
             self.cur_batch = batch
             last_batch_in_queue = False
@@ -718,15 +731,19 @@ class SchedulerDisaggregationDecodeMixin:
                         batch.reqs, any(req.return_logprob for req in batch.reqs)
                     )
                     if prepare_mlp_sync_flag:
+                        tic = time.perf_counter()
                         batch_, result = self._prepare_idle_batch_and_run(
                             None, delay_process=True
                         )
+                        print("0. prepare_idle_batch_and_run perf time: ", time.perf_counter() - tic)
                         if batch_:
                             result_queue.append((batch_.copy(), result))
                             last_batch_in_queue = True
                 else:
                     if prepare_mlp_sync_flag:
+                        tic = time.perf_counter()
                         self.prepare_mlp_sync_batch(batch)
+                        print("1.prepare_mlp_sync_batch perf time: ", time.perf_counter() - tic)
                     result = self.run_batch(batch)
                     result_queue.append((batch.copy(), result))
 
@@ -738,24 +755,32 @@ class SchedulerDisaggregationDecodeMixin:
                             forward_mode=ForwardMode.DUMMY_FIRST,
                             next_batch_sampling_info=self.tp_worker.cur_sampling_info,
                         )
+                        tic2 = time.perf_counter()
                         self.set_next_batch_sampling_info_done(tmp_batch)
+                        print("3.set_next_batch_sampling_info_done perf time: ", time.perf_counter() - tic2)
+
                     last_batch_in_queue = True
 
             elif prepare_mlp_sync_flag:
+                tic = time.perf_counter()
                 batch, result = self._prepare_idle_batch_and_run(
                     None, delay_process=True
                 )
+                print("2._prepare_idle_batch_and_run perf time: ", time.perf_counter() - tic)
+
                 if batch:
                     result_queue.append((batch.copy(), result))
                     last_batch_in_queue = True
 
             # Process the results of the previous batch but skip if the last batch is extend
             if self.last_batch and self.last_batch_in_queue:
+                tt = time.perf_counter()
                 tmp_batch, tmp_result = result_queue.popleft()
                 tmp_batch.next_batch_sampling_info = (
                     self.tp_worker.cur_sampling_info if batch else None
                 )
                 self.process_batch_result(tmp_batch, tmp_result)
+                print("4.process_batch_result perf time: ", time.perf_counter()-tt)
 
             if batch is None and (
                 len(self.waiting_queue)
@@ -770,6 +795,7 @@ class SchedulerDisaggregationDecodeMixin:
 
             self.last_batch = batch
             self.last_batch_in_queue = last_batch_in_queue
+            last_time = time.perf_counter()
 
     def _prepare_idle_batch_and_run(self: Scheduler, batch, delay_process=False):
         batch, _ = self.prepare_mlp_sync_batch(batch)

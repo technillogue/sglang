@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
@@ -683,6 +684,7 @@ class SchedulerOutputProcessorMixin:
                     output_hidden_states,
                 )
             )
+
 
     def stream_output_embedding(self: Scheduler, reqs: List[Req]):
         rids = []

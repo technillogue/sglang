@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import torch
@@ -100,6 +101,7 @@ class ScheduleBatchDisaggregationDecodeMixin:
         self.output_ids = []
         for req in self.reqs:
             self.output_ids.append(req.output_ids[-1])
+            print(f"[{datetime.now()}] Req process_prebuilt_extend {req.rid}")
             self.tree_cache.cache_unfinished_req(req)
             if req.grammar is not None:
                 req.grammar.accept_token(req.output_ids[-1])
