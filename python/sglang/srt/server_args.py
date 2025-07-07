@@ -1757,10 +1757,7 @@ class PortArgs:
     # The ipc filename for detokenizer to receive inputs from scheduler (zmq)
     detokenizer_ipc_name: str
 
-    # The port for
-
-
-    initialization (torch.dist)
+    # The port for initialization (torch.dist)
     nccl_port: int
 
     # The ipc filename for rpc call between Engine and Scheduler
