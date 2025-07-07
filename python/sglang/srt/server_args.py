@@ -68,6 +68,7 @@ class ServerArgs:
     # Port for the HTTP server
     host: str = "127.0.0.1"
     port: int = 30000
+    worker_num: int = 1
     nccl_port: Optional[int] = None
 
     # Memory and scheduling
@@ -604,6 +605,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.nccl_port,
             help="The port for NCCL distributed environment setup. Defaults to a random port.",
+        )
+        parser.add_argument(
+            "--worker-num",
+            type=int,
+            default=ServerArgs.worker_num,
+            help="The worker num of the server.",
         )
         parser.add_argument(
             "--tokenizer-mode",
@@ -1750,7 +1757,10 @@ class PortArgs:
     # The ipc filename for detokenizer to receive inputs from scheduler (zmq)
     detokenizer_ipc_name: str
 
-    # The port for nccl initialization (torch.dist)
+    # The port for
+
+
+    initialization (torch.dist)
     nccl_port: int
 
     # The ipc filename for rpc call between Engine and Scheduler
@@ -1758,6 +1768,9 @@ class PortArgs:
 
     # The ipc filename for Scheduler to send metrics
     metrics_ipc_name: str
+
+    # The ipc filename for Tokenizer and worker tokenizer
+    tokenizer_worker_ipc_name: Optional[str]
 
     @staticmethod
     def init_new(server_args, dp_rank: Optional[int] = None) -> "PortArgs":
@@ -1775,7 +1788,7 @@ class PortArgs:
 
         if not server_args.enable_dp_attention:
             # Normal case, use IPC within a single node
-            return PortArgs(
+            port_args = PortArgs(
                 tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
@@ -1783,6 +1796,7 @@ class PortArgs:
                 rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 go_tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 metrics_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                tokenizer_worker_ipc_name=None,
             )
         else:
             # DP attention. Use TCP + port to handle both single-node and multi-node.
@@ -1806,7 +1820,7 @@ class PortArgs:
             else:
                 scheduler_input_port = port_base + 4 + 1 + dp_rank
 
-            return PortArgs(
+            port_args = PortArgs(
                 tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
                 scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base + 1}",
@@ -1814,7 +1828,13 @@ class PortArgs:
                 rpc_ipc_name=f"tcp://{dist_init_host}:{port_base + 2}",
                 metrics_ipc_name=f"tcp://{dist_init_host}:{port_base + 3}",
                 go_tokenizer_ipc_name=f"tcp://{dist_init_host}:10110",
+                tokenizer_worker_ipc_name=None,
             )
+        if server_args.worker_num > 1:
+            port_args.tokenizer_worker_ipc_name = (
+                f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+            )
+        return port_args
 
 
 class LoRAPathAction(argparse.Action):
