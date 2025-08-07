@@ -363,21 +363,6 @@ class GraniteForCausalLM(nn.Module):
         else:
             return self.pooler(hidden_states, forward_batch)
 
-    def get_hidden_dim(self, module_name):
-        # return input_dim, output_dim
-        if module_name in ["q_proj", "o_proj", "qkv_proj"]:
-            return self.config.hidden_size, self.config.hidden_size
-        elif module_name in ["kv_proj"]:
-            return self.config.hidden_size, self.config.hidden_size // (
-                self.config.num_attention_heads // self.config.num_key_value_heads
-            )
-        elif module_name == "gate_up_proj":
-            return self.config.hidden_size, self.config.intermediate_size
-        elif module_name == "down_proj":
-            return self.config.intermediate_size, self.config.hidden_size
-        else:
-            raise NotImplementedError()
-
     def get_module_name(self, name):
         params_mapping = {
             "q_proj": "qkv_proj",

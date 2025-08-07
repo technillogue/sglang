@@ -305,30 +305,13 @@ class LoRAManager:
         """
         for layer_id, layer_modules in enumerate(self.lora_modules):
             for module_name, module in layer_modules.items():
-                if "qkv_proj" in module_name:
-                    module.set_lora_info(
-                        self.memory_pool.get_tensor(
-                            "qkv_proj", layer_id, LoRAType.LORA_A
-                        ),
-                        self.memory_pool.get_tensor(
-                            "q_proj", layer_id, LoRAType.LORA_B
-                        ),
-                        self.memory_pool.get_tensor(
-                            "kv_proj", layer_id, LoRAType.LORA_B
-                        ),
-                    )
-                else:
-                    weight_name = get_weight_name(
-                        module_name, self.memory_pool.lora_weight_names, LoRAType.LORA_A
-                    )
-                    module.set_lora_info(
-                        self.memory_pool.get_tensor(
-                            weight_name, layer_id, LoRAType.LORA_A
-                        ),
-                        self.memory_pool.get_tensor(
-                            weight_name, layer_id, LoRAType.LORA_B
-                        ),
-                    )
+                weight_name = get_weight_name(
+                    module_name, self.memory_pool.lora_weight_names
+                )
+                module.set_lora_info(
+                    self.memory_pool.get_tensor(weight_name, layer_id, LoRAType.LORA_A),
+                    self.memory_pool.get_tensor(weight_name, layer_id, LoRAType.LORA_B),
+                )
 
     def init_state(
         self,
@@ -408,9 +391,9 @@ class LoRAManager:
         Add new LoRA weight names if needed based on the current `self.configs`.
         """
 
-        # Target lora weight names for lora_a and lora_b modules respectively.
-        lora_A, lora_B = get_normalized_lora_weight_names(self.target_modules)
-        self.lora_weight_names: Tuple[Set[str]] = (set(lora_A), set(lora_B))
+        self.lora_weight_names: Set[str] = get_normalized_lora_weight_names(
+            self.target_modules
+        )
 
     def load_lora_weights(self, lora_ref: LoRARef):
         """

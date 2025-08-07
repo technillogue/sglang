@@ -135,22 +135,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     ):
         self.set_lora = True
         self.A_buffer_gate_up = A_buffer
-        if self.lora_backend.fuse_stacked_lora_b:
-            # B_buffer_gate_up: (num_lora, 2 * output_dim, r)
-            if getattr(self, "B_buffer_gate_up", None) is None:
-                self.B_buffer_gate_up = torch.empty(
-                    (
-                        B_buffer[0].shape[0],
-                        2 * B_buffer[0].shape[1],
-                        B_buffer[0].shape[2],
-                    ),
-                    dtype=B_buffer[0].dtype,
-                    device=B_buffer[0].device,
-                )
-            self.B_buffer_gate_up[:, : B_buffer[0].shape[1], :].copy_(B_buffer[0])
-            self.B_buffer_gate_up[:, B_buffer[0].shape[1] :, :].copy_(B_buffer[1])
-        else:
-            self.B_buffer_gate_up = (B_buffer[0], B_buffer[1])
+        self.B_buffer_gate_up = B_buffer
 
     def apply_lora(self, base_output: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         backend_kwargs = {"base_output": base_output}
@@ -171,6 +156,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         return A
 
     def slice_lora_b_weights(self, B: torch.Tensor, tp_rank: int):
+        # TODO: verify before merge!!!
         # Since the outputs for both gate and up are identical, we use a random one.
         shard_size = self.base_layer.output_partition_sizes[0]
         start_idx = tp_rank * shard_size
@@ -185,66 +171,37 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_backend: BaseLoRABackend,
     ) -> None:
         super().__init__(base_layer, lora_backend)
+        q_proj_shard_size = self.base_layer.q_proj_shard_size
+        kv_proj_shard_size = self.base_layer.kv_proj_shard_size
+        self.output_offset = torch.tensor(
+            [
+                0,
+                q_proj_shard_size,
+                q_proj_shard_size + kv_proj_shard_size,
+                q_proj_shard_size + 2 * kv_proj_shard_size,
+            ],
+            dtype=torch.int32,
+            device=next(self.base_layer.parameters()).device,
+        )
+
+        # For computing number of launched blocks
+        self.max_qkv_out_dim = max(q_proj_shard_size, kv_proj_shard_size)
 
     def set_lora_info(
         self,
         A_buffer_qkv: torch.Tensor,
-        B_buffer_q: torch.Tensor,
-        B_buffer_kv: torch.Tensor,
+        B_buffer_qkv: torch.Tensor,
     ):
         self.set_lora = True
         self.A_buffer_qkv = A_buffer_qkv
-
-        if self.lora_backend.fuse_stacked_lora_b:
-            assert (
-                B_buffer_q.shape[-1] == B_buffer_kv.shape[-1]
-            ), "The lora rank of q and kv should be the same when enabling fusion of qkv lora_b"
-            output_dim_q, output_dim_kv = B_buffer_q.shape[-2], B_buffer_kv.shape[-2]
-
-            # B_buffer_qkv: (num_lora, output_dim_q + 2 * output_dim_kv, r)
-            if getattr(self, "B_buffer_qkv", None) is None:
-                self.B_buffer_qkv = torch.empty(
-                    (
-                        B_buffer_q[0].shape[0],
-                        output_dim_q + 2 * output_dim_kv,
-                        B_buffer_q[0].shape[2],
-                    ),
-                    dtype=B_buffer_q[0].dtype,
-                    device=B_buffer_q[0].device,
-                )
-            self.B_buffer_qkv[:, :output_dim_q, :].copy_(B_buffer_q[0])
-            self.B_buffer_qkv[:, output_dim_q : output_dim_q + output_dim_kv, :].copy_(
-                B_buffer_kv[0]
-            )
-            self.B_buffer_qkv[:, output_dim_q + output_dim_kv :, :].copy_(
-                B_buffer_kv[1]
-            )
-
-            # Offsets of q/k/v in output dimension
-            if getattr(self, "output_offset", None) is None:
-                self.output_offset = torch.tensor(
-                    [
-                        0,
-                        output_dim_q,
-                        output_dim_q + output_dim_kv,
-                        output_dim_q + 2 * output_dim_kv,
-                    ],
-                    dtype=torch.int32,
-                    device=B_buffer_q.device,
-                )
-            # For computing number of launched blocks
-            self.max_qkv_out_dim = max(output_dim_q, output_dim_kv)
-        else:
-            self.B_buffer_qkv = (
-                B_buffer_q,
-                B_buffer_kv,
-            )
+        self.B_buffer_qkv = B_buffer_qkv
 
     def apply_lora(self, base_output: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        backend_kwargs = {"base_output": base_output}
-        if self.lora_backend.fuse_stacked_lora_b:
-            backend_kwargs["output_offset"] = self.output_offset
-            backend_kwargs["max_qkv_out_dim"] = self.max_qkv_out_dim
+        backend_kwargs = {
+            "base_output": base_output,
+            "output_offset": self.output_offset,
+            "max_qkv_out_dim": self.max_qkv_out_dim,
+        }
 
         lora_output = self.lora_backend.run_qkv_lora(
             x,
@@ -264,20 +221,34 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def slice_lora_b_weights(
         self, B: List[torch.Tensor], tp_rank: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        B_q, B_kv = B
+        # TODO: FIX before merge!!!
         base_layer = self.base_layer
+        total_num_heads = base_layer.total_num_heads
+        total_num_kv_heads = base_layer.total_num_kv_heads
         q_proj_shard_size = base_layer.q_proj_shard_size
         kv_proj_shard_size = base_layer.kv_proj_shard_size
         num_kv_head_replicas = base_layer.num_kv_head_replicas
+        head_size = base_layer.head_size
 
         q_start_idx = q_proj_shard_size * tp_rank
         q_end_idx = q_start_idx + q_proj_shard_size
 
         kv_shard_id = tp_rank // num_kv_head_replicas
-        kv_start_idx = kv_proj_shard_size * kv_shard_id
-        kv_end_idx = kv_start_idx + kv_proj_shard_size
+        k_start_idx = total_num_heads * head_size + kv_proj_shard_size * kv_shard_id
+        k_end_idx = k_start_idx + kv_proj_shard_size
+        v_start_idx = (
+            total_num_heads + total_num_kv_heads
+        ) * head_size + kv_proj_shard_size * kv_shard_id
+        v_end_idx = v_start_idx + kv_proj_shard_size
 
-        return B_q[q_start_idx:q_end_idx, :], B_kv[:, kv_start_idx:kv_end_idx, :]
+        return torch.cat(
+            (
+                B[:, q_start_idx:q_end_idx, :],
+                B[:, k_start_idx:k_end_idx, :],
+                B[:, v_start_idx:v_end_idx, :],
+            ),
+            dim=1,
+        )
 
 
 class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
@@ -298,7 +269,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         lora_a_output = self.lora_backend.run_lora_a_sgemm(x, self.A_buffer)
         lora_output = self.lora_backend.run_lora_b_sgemm(
             lora_a_output,
-            self.B_buffer[0],
+            self.B_buffer,
             **backend_kwargs,
         )
         return (
