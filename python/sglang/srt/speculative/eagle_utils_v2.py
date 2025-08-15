@@ -51,26 +51,28 @@ SIMULATE_ACC_METHOD = os.environ.get("SIMULATE_ACC_METHOD", "multinomial")
 class EagleDraftInput:
     # The inputs for decode
     # shape: (b, topk)
-    topk_p: torch.Tensor = None
-    topk_index: torch.Tensor = None
+    topk_p: torch.Tensor = None  # future when overlap
+    topk_index: torch.Tensor = None  # future when overlap
     # shape: (b, hidden_size)
-    hidden_states: torch.Tensor = None
+    hidden_states: torch.Tensor = None  # future when overlap
 
     # Inputs for extend
     # shape: (b,)
-    verified_id: torch.Tensor = None
+    verified_id: torch.Tensor = None  # future when overlap
 
     # Metadata for seq_lens
-    allocate_lens: torch.Tensor = None
-    new_seq_lens: torch.Tensor = None
-    verify_done: torch.cuda.Event = None
+    new_seq_lens: torch.Tensor = None  # future when overlap
+    allocate_lens: torch.Tensor = None  # never a future
+    verify_done: torch.cuda.Event = None  # never a future
 
+    # for overlap schedule, these are references, so can be indexed without race condition
     def filter_batch(self, new_indices: torch.Tensor):
-        self.topk_p = self.topk_p[: len(new_indices)]
-        self.topk_index = self.topk_index[: len(new_indices)]
-        self.hidden_states = self.hidden_states[: len(new_indices)]
-        self.verified_id = self.verified_id[: len(new_indices)]
-        self.allocate_lens = self.allocate_lens[: len(new_indices)]
+        self.topk_p = self.topk_p[new_indices]
+        self.topk_index = self.topk_index[new_indices]
+        self.hidden_states = self.hidden_states[new_indices]
+        self.verified_id = self.verified_id[new_indices]
+        self.allocate_lens = self.allocate_lens[new_indices]
+        self.new_seq_lens = self.new_seq_lens[new_indices]
 
     def merge_batch(self, spec_info: EagleDraftInput):
         self.topk_p = torch.cat([self.topk_p, spec_info.topk_p])
@@ -81,6 +83,9 @@ class EagleDraftInput:
         self.verified_id = torch.cat([self.verified_id, spec_info.verified_id], axis=0)
         self.allocate_lens = torch.cat(
             [self.allocate_lens, spec_info.allocate_lens], axis=0
+        )
+        self.new_seq_lens = torch.cat(
+            [self.new_seq_lens, spec_info.new_seq_lens], axis=0
         )
 
     def prepare_for_draft(
@@ -357,20 +362,15 @@ def fill_new_verified_id(
     verified_id,
     accept_lens,
     new_verified_id,
-    bs_upper: tl.constexpr,
+    num_draft_tokens: tl.constexpr,
 ):
     # NOTE: we cannot fuse any in-place operations of `accept_lens` inside this kernel
     # because this kernel reads accept_lens
     pid = tl.program_id(axis=0)
-    offsets = tl.arange(0, bs_upper)
     accept_length = tl.load(accept_lens + pid)
 
-    accept_len_cumsum = tl.sum(
-        tl.load(accept_lens + offsets, mask=offsets < pid, other=0)
-    )
-
-    accept_len_cumsum += accept_length - 1
-    verified_id_data = tl.load(verified_id + accept_len_cumsum)
+    verified_id_idx = num_draft_tokens * pid + accept_length - 1
+    verified_id_data = tl.load(verified_id + verified_id_idx)
     tl.store(new_verified_id + pid, verified_id_data)
 
 

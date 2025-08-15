@@ -61,6 +61,10 @@ class EAGLEWorker(TpModelWorker):
         self.speculative_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
+        self.alloc_len_per_eagle_decode = max(
+            self.num_steps * self.topk,
+            self.num_draft_tokens,
+        )
 
         # Override context length with target model's context length
         server_args.context_length = target_worker.model_runner.model_config.context_len
@@ -217,9 +221,9 @@ class EAGLEWorker(TpModelWorker):
             batch_output: The results in a tuple
         """
         if batch.forward_mode.is_decode():
-            old_spec_info = batch.spec_info
+            pre_draft_allocate_lens = batch.spec_info.allocate_lens
             spec_info = self.draft(batch)
-            batch_output = self.verify(batch, spec_info, old_spec_info)
+            batch_output = self.verify(batch, spec_info, pre_draft_allocate_lens)
             return batch_output
         else:
             # Target prefill
@@ -376,7 +380,7 @@ class EAGLEWorker(TpModelWorker):
         self,
         batch: ModelWorkerBatch,
         spec_info: EagleVerifyInput,
-        old_spec_info: EagleDraftInput,
+        pre_draft_allocate_lens: torch.Tensor,
     ):
         # Parse args
         seq_lens_backup = batch.seq_lens
@@ -436,7 +440,7 @@ class EAGLEWorker(TpModelWorker):
             all_verified_id,
             accept_length,
             verified_id,
-            next_power_of_2(max(self.num_steps + 1, bs)),
+            self.num_draft_tokens,
         )
 
         # Batch 2: Draft extend
@@ -478,6 +482,11 @@ class EAGLEWorker(TpModelWorker):
         ret_topk_p, ret_topk_index = fast_topk(probs, self.topk, dim=-1)
         ret_hidden_states = draft_logits_output.hidden_states
 
+        # Since seq_lens_backup's tensor is allocated in another stream, we
+        # need record_stream() to prevent pytorch gc and reuse the gpu memory
+        # while forward_stream is still running.
+        seq_lens_backup.record_stream(torch.cuda.current_stream())
+
         # Construct the return values
         draft_input = EagleDraftInput(
             topk_p=ret_topk_p,
@@ -485,7 +494,7 @@ class EAGLEWorker(TpModelWorker):
             hidden_states=ret_hidden_states,
             verified_id=verified_id,
             new_seq_lens=new_seq_lens,
-            allocate_lens=old_spec_info.allocate_lens,
+            allocate_lens=pre_draft_allocate_lens,
             verify_done=verify_done,
         )
 
