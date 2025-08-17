@@ -202,6 +202,10 @@ async def async_request_openai_completions(
             "ignore_eos": not args.disable_ignore_eos,
             **request_func_input.extra_request_body,
         }
+
+        if request_func_input.image_data:
+            payload.update({"image_data": request_func_input.image_data})
+
         headers = get_auth_headers()
 
         output = RequestFuncOutput.init_new(request_func_input)
@@ -640,7 +644,7 @@ def get_dataset(args, tokenizer):
     if args.dataset_name == "sharegpt":
         assert not tokenize_prompt
         input_requests = sample_sharegpt_requests(
-            dataset_path=args.dataset_path,
+            dataset_path=args.dataset_name,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             fixed_output_len=args.sharegpt_output_len,
@@ -655,7 +659,7 @@ def get_dataset(args, tokenizer):
             num_prompts=args.num_prompts,
             range_ratio=args.random_range_ratio,
             tokenizer=tokenizer,
-            dataset_path=args.dataset_path,
+            dataset_path=args.dataset_name,
             random_sample=args.dataset_name == "random",
             return_text=not tokenize_prompt,
         )
@@ -1422,6 +1426,7 @@ async def benchmark(
             image_data=request.image_data,
             extra_request_body=extra_request_body,
         )
+        print(f"{request_func_input.image_data=}")
 
         tasks.append(
             asyncio.create_task(
