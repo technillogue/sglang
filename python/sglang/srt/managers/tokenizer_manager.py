@@ -471,7 +471,6 @@ class TokenizerManager:
         obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
     ):
-        print(f"474 {obj=}")
         created_time = time.time()
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
@@ -507,8 +506,8 @@ class TokenizerManager:
     ):
         """Tokenize one request."""
         # Tokenize
-        print(f"510 {obj=}")
-        print(f"510 {obj.contains_mm_input()=}")
+        # print(f"510 {obj=}")
+        # print(f"510 {obj.contains_mm_input()=}")
         input_embeds = None
         input_text = obj.text
         token_type_ids = None
