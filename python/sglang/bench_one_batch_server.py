@@ -18,7 +18,7 @@ import json
 import multiprocessing
 import os
 import time
-from typing import List, Tuple
+from typing import Tuple
 
 import requests
 
@@ -31,7 +31,6 @@ from sglang.profiler import run_profile
 from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
-from sglang.test.simple_eval_mmmu_vlm import MMMUVLMEval
 from sglang.test.test_utils import is_in_ci, write_github_step_summary
 
 
@@ -206,43 +205,41 @@ def run_one_case(
         )
 
     tic = time.perf_counter()
+
+    payload = {
+        "sampling_params": {
+            "temperature": temperature,
+            "max_new_tokens": output_len,
+            "ignore_eos": True,
+            "json_schema": json_schema,
+            "stream_interval": stream_interval,
+        },
+        "return_logprob": return_logprob,
+        "stream": True,
+    }
     if dataset_name == "mmmu":
         # vlm
+        input_ids = []
+        image_data = []
         for input_req in input_requests:
-            messages = MMMUVLMEval.build_chat_messages_from_prompt(
-                input_req.prompt, input_req.image_data
-            )
+            # messages = MMMUVLMEval.build_chat_messages_from_prompt(
+            #     input_req.prompt, input_req.image_data
+            # )
+            # input_ids += tokenizer。。。。.encode(input_req.prompt)
+            input_ids += [tokenizer.encode(input_req.prompt)]
+        payload["image_data"] = [req.image_data for req in input_requests]
+        print(f"{input_ids=}")
 
-        response = requests.post(
-            url + "/v1/completions",
-            json={
-                "model": "",
-                "prompt": [req.prompt for req in input_requests],
-                "image_data": [req.image_data for req in input_requests],
-                "temperature": temperature,
-                "max_new_tokens": output_len,
-                "stream_interval": stream_interval,
-                "stream": True,
-            },
-            stream=True,
-        )
     else:
-        response = requests.post(
-            url + "/generate",
-            json={
-                "input_ids": [req.prompt for req in input_requests],
-                "sampling_params": {
-                    "temperature": temperature,
-                    "max_new_tokens": output_len,
-                    "ignore_eos": True,
-                    "json_schema": json_schema,
-                    "stream_interval": stream_interval,
-                },
-                "return_logprob": return_logprob,
-                "stream": True,
-            },
-            stream=True,
-        )
+        input_ids = [req.prompt for req in input_requests]
+
+    payload["input_ids"] = input_ids
+
+    response = requests.post(
+        url + "/generate",
+        json=payload,
+        stream=True,
+    )
 
     # The TTFT of the last request in the batch
     ttft = 0.0
@@ -255,7 +252,7 @@ def run_one_case(
             if "error" in data:
                 raise RuntimeError(f"Request has failed. {data}.")
 
-            if dataset_name == "mmmu":
+            if dataset_name == "mmmu1":
                 if data["choices"][0]["text"]:
                     # First token
                     if ttft == 0.0:

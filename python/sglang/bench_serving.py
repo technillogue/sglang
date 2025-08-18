@@ -881,6 +881,7 @@ def sample_mmmu_requests(
 
                 # Construct the prompt
                 prompt = f"Question: {question}\n\nAnswer: "
+                print(f"{prompt=}")
                 if apply_chat_template:
                     try:
                         prompt = tokenizer.apply_chat_template(
