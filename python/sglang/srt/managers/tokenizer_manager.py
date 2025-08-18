@@ -943,6 +943,7 @@ class TokenizerManager:
         record_shapes: Optional[bool] = None,
         profile_by_stage: bool = False,
     ):
+        self.mm_processor = None
         self.auto_create_handle_loop()
         env_with_stack: bool = get_bool_env_var("SGLANG_PROFILE_WITH_STACK", "true")
         with_stack = False if with_stack is False or env_with_stack is False else True
