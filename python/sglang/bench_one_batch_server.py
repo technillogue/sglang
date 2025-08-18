@@ -314,7 +314,9 @@ def run_one_case(
     )
 
 
-def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
+def run_benchmark(
+    server_args: ServerArgs, bench_args: BenchArgs, append_to_summary: bool = True
+):
     if bench_args.base_url:
         proc, base_url = None, bench_args.base_url
     else:
@@ -456,7 +458,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
     # print metrics table
     print(summary)
 
-    if is_in_ci():
+    if is_in_ci() and append_to_summary:
         write_github_step_summary(summary)
 
 
@@ -468,4 +470,4 @@ if __name__ == "__main__":
     server_args = ServerArgs.from_cli_args(args)
     bench_args = BenchArgs.from_cli_args(args)
 
-    run_benchmark(server_args, bench_args)
+    run_benchmark(server_args, bench_args, append_to_summary=False)
