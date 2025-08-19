@@ -881,7 +881,7 @@ def sample_mmmu_requests(
 
                 # Construct the prompt
                 prompt = f"Question: {question}\n\nAnswer: "
-                print(f"{prompt=}")
+                # print(f"{prompt=}")
                 if apply_chat_template:
                     try:
                         prompt = tokenizer.apply_chat_template(
@@ -1427,7 +1427,6 @@ async def benchmark(
             image_data=request.image_data,
             extra_request_body=extra_request_body,
         )
-        print(f"{request_func_input.image_data=}")
 
         tasks.append(
             asyncio.create_task(
