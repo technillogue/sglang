@@ -198,6 +198,7 @@ class TopK(CustomOp):
         scoring_func: str = "softmax",
         correction_bias: Optional[torch.Tensor] = None,
         routed_scaling_factor: Optional[float] = None,
+        output_format: Optional[TopKOutputFormat] = None,
     ):
         # NOTE: scoring_func is not used for now, but we keep it for future use
         # see https://github.com/sgl-project/sglang/pull/4505 for more details
@@ -216,6 +217,7 @@ class TopK(CustomOp):
             custom_routing_function=custom_routing_function,
             correction_bias=correction_bias,
             routed_scaling_factor=routed_scaling_factor,
+            output_format=output_format,
         )
 
         self.use_triton_kernels = get_moe_runner_backend().is_triton_kernel()
