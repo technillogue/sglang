@@ -94,6 +94,7 @@ class TopKConfig:
     torch_native: bool = False
     routed_scaling_factor: Optional[float] = None
     apply_routed_scaling_factor_on_output: bool = False
+    output_format: Optional[TopKOutputFormat] = None
 
 
 # -------------------------------- TopKOutput ---------------------------------------
@@ -244,7 +245,19 @@ class TopK(CustomOp):
         num_token_non_padded: Optional[torch.Tensor] = None,
         expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
     ) -> TopKOutput:
-        if self.use_triton_kernels:
+        if self.topk_config.output_format is not None:
+            output_format = self.topk_config.output_format
+        elif self.use_triton_kernels:
+            output_format = TopKOutputFormat.TRITON_KERNEL
+        elif (
+            should_use_flashinfer_trtllm_moe()
+            or get_moe_runner_backend().is_flashinfer_mxfp4()
+        ):
+            output_format = TopKOutputFormat.BYPASSED
+        else:
+            output_format = TopKOutputFormat.STANDARD
+
+        if output_format.is_triton_kernel():
             # renormalize=True is equivalent to sm_first=False
             routing_data, gather_idx, scatter_idx = routing(
                 router_logits,
@@ -252,10 +265,7 @@ class TopK(CustomOp):
                 sm_first=not self.topk_config.renormalize,
             )
             return TritonKernelTopKOutput(routing_data, gather_idx, scatter_idx)
-        elif (
-            should_use_flashinfer_trtllm_moe()
-            or get_moe_runner_backend().is_flashinfer_mxfp4()
-        ):
+        elif output_format.is_bypassed():
             return BypassedTopKOutput(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
