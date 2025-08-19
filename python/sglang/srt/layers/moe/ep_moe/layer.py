@@ -801,7 +801,8 @@ def get_moe_impl_class(quant_config: Optional[QuantizationConfig]):
         except:
             pass
 
-    if should_use_flashinfer_trtllm_moe():
+    if should_use_flashinfer_trtllm_moe() and quant_config is not None:
+        # FIXME: FlashInferFusedMoE anly supports fp8 quant now
         return FlashInferFusedMoE
     if get_moe_runner_backend().is_flashinfer_cutlass():
         return FusedMoE
