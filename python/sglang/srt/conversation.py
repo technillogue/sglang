@@ -607,7 +607,7 @@ def generate_chat_conv(
                         conv.modalities.append(content.modalities)
                 image_token = (
                     conv.image_token + "\n"
-                    if conv.name != "qwen2-vl"
+                    if conv.name != "qwen2-vl" and conv.name != "phi-4-mm"
                     else conv.image_token
                 )
                 add_token_as_needed: bool = (
@@ -625,7 +625,7 @@ def generate_chat_conv(
                         real_content += content.text
                     elif content.type == "image_url":
                         # NOTE: works for llava and intervl2_5
-                        if conv.name in ["internvl-2-5"]:
+                        if conv.name in ["internvl-2-5", "phi-4-mm"]:
                             real_content = image_token + real_content
                         else:
                             real_content += image_token
