@@ -606,9 +606,9 @@ def generate_chat_conv(
                         num_image_url += 1
                         conv.modalities.append(content.modalities)
                 image_token = (
-                    conv.image_token + "\n"
-                    if conv.name != "qwen2-vl" and conv.name != "phi-4-mm"
-                    else conv.image_token
+                    conv.image_token
+                    if conv.name in ["qwen2-vl", "phi-4-mm"]
+                    else conv.image_token + "\n"
                 )
                 add_token_as_needed: bool = (
                     conv.name in _MODELS_REQUIRING_MODALITY_SUPPLEMENT
