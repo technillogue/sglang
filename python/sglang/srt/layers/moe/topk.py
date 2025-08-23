@@ -259,7 +259,7 @@ class TopK(CustomOp):
         else:
             output_format = TopKOutputFormat.STANDARD
 
-        if output_format.is_triton_kernel():
+        if output_format == TopKOutputFormat.TRITON_KERNEL:
             # renormalize=True is equivalent to sm_first=False
             routing_data, gather_idx, scatter_idx = routing(
                 router_logits,
@@ -267,7 +267,7 @@ class TopK(CustomOp):
                 sm_first=not self.topk_config.renormalize,
             )
             return TritonKernelTopKOutput(routing_data, gather_idx, scatter_idx)
-        elif output_format.is_bypassed():
+        elif output_format == TopKOutputFormat.BYPASSED:
             return BypassedTopKOutput(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
