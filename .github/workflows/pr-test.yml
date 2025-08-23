@@ -22,7 +22,27 @@ concurrency:
 
 jobs:
 
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      src: ${{ steps.filter.outputs.src }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect file changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            src:
+              - "python/**"
+              - "scripts/**"
+              - "test/**"
+              - ".github/workflows/pr-test.yml"
+
   unit-test-backend-8-gpu-b200:
+    needs: [check-changes]
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') &&
       github.event.pull_request.draft == false &&
       needs.check-changes.outputs.src == 'true'
