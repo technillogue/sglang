@@ -799,6 +799,7 @@ def get_moe_impl_class(quant_config: Optional[QuantizationConfig]):
                 from sglang.srt.layers.moe.fused_moe_triton.layer import (
                     FlashInferFP4MoE,
                 )
+
                 return FlashInferFP4MoE
         except:
             pass
