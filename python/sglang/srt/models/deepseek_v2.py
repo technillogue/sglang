@@ -492,6 +492,7 @@ class DeepseekV2MoE(nn.Module):
             and not should_use_flashinfer_cutlass_moe_fp4_allgather()
         ):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+
         return final_hidden_states
 
     def forward_normal(
