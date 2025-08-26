@@ -61,7 +61,7 @@ class TritonRunnerInput(RunnerInput):
     sorted_token_ids: torch.Tensor
     expert_ids: torch.Tensor
     num_tokens_post_padded: torch.Tensor
-    
+
     @property
     def runner_backend(self) -> MoeRunnerBackend:
         return MoeRunnerBackend.TRITON
@@ -362,6 +362,9 @@ def pre_permute_standard_to_triton(
     running_state: dict,
 ) -> TritonRunnerInput:
 
+    # NOTE: this is dead code as a fused func for standard format is registered.
+    # This is left here for testing and examples.
+
     from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
         get_config_dtype_str,
         moe_align_block_size,
@@ -370,9 +373,9 @@ def pre_permute_standard_to_triton(
     from sglang.srt.layers.moe.topk import TopKOutputChecker
 
     hidden_states, topk_output = dispatch_output
-    
+
     assert TopKOutputChecker.format_is_standard(topk_output)
-    
+
     num_tokens = hidden_states.shape[0]
     num_local_experts = runner_config.num_local_experts
 
@@ -431,6 +434,10 @@ def post_permute_triton_to_standard(
     runner_config: MoeRunnerConfig,
     running_state: dict,
 ) -> StandardCombineInput:
+
+    # NOTE: this is dead code as a fused func for standard format is registered.
+    # This is left here for testing and examples.
+
     return StandardCombineInput(
         hidden_states=runner_output.hidden_states,
     )

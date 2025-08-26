@@ -18,9 +18,9 @@ from sglang.srt.layers.moe.utils import MoeA2ABackend, MoeRunnerBackend
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.moe_runner.triton import (
+        TritonRunnerCore,
         TritonRunnerInput,
         TritonRunnerOutput,
-        TritonRunnerCore,
     )
 
 
@@ -52,8 +52,7 @@ class RunnerInput(ABC):
 
     @property
     @abstractmethod
-    def runner_backend(self) -> MoeRunnerBackend:
-        ...
+    def runner_backend(self) -> MoeRunnerBackend: ...
 
     def runner_backend_is_triton(self) -> TypeGuard[TritonRunnerInput]:
         return self.runner_backend == MoeRunnerBackend.TRITON
@@ -63,8 +62,7 @@ class RunnerOutput(ABC):
 
     @property
     @abstractmethod
-    def runner_backend(self) -> MoeRunnerBackend:
-        ...
+    def runner_backend(self) -> MoeRunnerBackend: ...
 
     def runner_backend_is_triton(self) -> TypeGuard[TritonRunnerOutput]:
         return self.runner_backend == MoeRunnerBackend.TRITON
@@ -90,8 +88,7 @@ class MoeRunnerCore(ABC):
 
     @property
     @abstractmethod
-    def runner_backend(cls) -> MoeRunnerBackend:
-        ...
+    def runner_backend(cls) -> MoeRunnerBackend: ...
 
     def runner_backend_is_triton(self) -> TypeGuard[TritonRunnerCore]:
         return self.runner_backend == MoeRunnerBackend.TRITON
@@ -149,8 +146,12 @@ class PermuteMethodPool:
             raise ValueError(
                 f"Pre-permute method for {dispatch_output_name} to {runner_backend_name} is already registered."
             )
-        assert DispatchOutputFormat(dispatch_output_name), f"Invalid dispatch output name: {dispatch_output_name}"
-        assert MoeRunnerBackend(runner_backend_name), f"Invalid runner backend name: {runner_backend_name}"
+        assert DispatchOutputFormat(
+            dispatch_output_name
+        ), f"Invalid dispatch output name: {dispatch_output_name}"
+        assert MoeRunnerBackend(
+            runner_backend_name
+        ), f"Invalid runner backend name: {runner_backend_name}"
         cls._pre_permute_methods[key] = permute_func
 
     @classmethod
@@ -172,8 +173,12 @@ class PermuteMethodPool:
             raise ValueError(
                 f"Post-permute method for {runner_backend_name} to {combine_input_name} is already registered."
             )
-        assert MoeRunnerBackend(runner_backend_name), f"Invalid runner backend name: {runner_backend_name}"
-        assert CombineInputFormat(combine_input_name), f"Invalid combine input name: {combine_input_name}"
+        assert MoeRunnerBackend(
+            runner_backend_name
+        ), f"Invalid runner backend name: {runner_backend_name}"
+        assert CombineInputFormat(
+            combine_input_name
+        ), f"Invalid combine input name: {combine_input_name}"
         cls._post_permute_methods[key] = permute_func
 
     @classmethod
