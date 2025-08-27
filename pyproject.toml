@@ -1,0 +1,20 @@
+[project]
+name = "sglang-example"
+
+[tool.jig]
+dockerfile = "docker/Dockerfile"
+
+[tool.jig.deploy]
+gpu_type = "h100-80gb"
+gpu_count = 1
+cpu = 4
+memory = 64
+port = 3000
+min_replicas = 1
+max_replicas = 1
+command = [
+    "python3", "-m", "sglang.launch_server", "--model-path", "qwen/qwen2.5-0.5b-instruct", "--host", "0.0.0.0", "--port", "3000"
+]
+
+[tool.jig.deploy.environment_variables]
+NCCL_DEBUG="debug"
