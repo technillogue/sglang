@@ -1,3 +1,24 @@
+# Deploy with Jig
+
+`TOGETHER_API_KEY=$TOGETHER_API_KEY python3 ../jig.py deploy`
+
+## Run with Together
+
+```
+curl -H "Authorization: Bearer $TOGETHER_API_KEY" -H "Content-Type: application/json" https://api.together.ai/v1/deployment-request/sglang-example/v1/chat/completions -d '{
+  "model": "qwen/qwen2.5-0.5b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "How do vision LLMs work?"
+    }
+  ]
+}'
+```
+
+
+---
+
 <div align="center" id="sglangtop">
 <img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
 
