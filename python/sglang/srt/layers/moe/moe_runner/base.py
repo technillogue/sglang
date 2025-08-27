@@ -100,15 +100,15 @@ class FusedOpPool:
 
     @classmethod
     def register_fused_func(
-        cls, dispatch_name: str, runner_name: str, fused_func: Callable
+        cls, a2a_backend_name: str, runner_backend_name: str, fused_func: Callable
     ):
-        key = (dispatch_name, runner_name)
+        key = (a2a_backend_name, runner_backend_name)
         if key in cls._fused_funcs:
             raise ValueError(
-                f"Fused function for {dispatch_name} to {runner_name} is already registered."
+                f"Fused function for {a2a_backend_name} to {runner_backend_name} is already registered."
             )
-        assert MoeA2ABackend(dispatch_name), f"Invalid dispatch name: {dispatch_name}"
-        assert MoeRunnerBackend(runner_name), f"Invalid runner name: {runner_name}"
+        assert MoeA2ABackend(a2a_backend_name), f"Invalid dispatch name: {a2a_backend_name}"
+        assert MoeRunnerBackend(runner_backend_name), f"Invalid runner name: {runner_backend_name}"
         cls._fused_funcs[key] = fused_func
 
     @classmethod
@@ -223,19 +223,19 @@ class PermuteMethodPool:
 
 
 def register_fused_func(
-    dispatch_name: str,
-    runner_name: str,
+    a2a_backend_name: str,
+    runner_backend_name: str,
 ) -> Callable:
     """
     Decorator to register a fused function for the given DispatchOutputFormat and MoeRunnerBackend.
 
-    :param dispatch_name: The DispatchOutputFormat name.
-    :param runner_name: The MoeRunnerBackend name.
+    :param a2a_backend_name: The A2A backend name.
+    :param runner_backend_name: The MoeRunnerBackend name.
     :return: The decorator function.
     """
 
     def decorator(fused_func: Callable):
-        FusedOpPool.register_fused_func(dispatch_name, runner_name, fused_func)
+        FusedOpPool.register_fused_func(a2a_backend_name, runner_backend_name, fused_func)
         return fused_func
 
     return decorator

@@ -53,7 +53,7 @@ class TestMLADeepseekV3(CustomTestCase):
 class TestMLADeepseekV3DisableFusedFunc(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        os.environ["SGLANG_CI_DISABLE_FUSED_FUNC"] = "1"
+        os.environ["SGLANG_CI_DISABLE_MOE_FUSED_FUNC"] = "1"
         cls.model = "lmsys/sglang-ci-dsv3-test"
         cls.base_url = DEFAULT_URL_FOR_TEST
         other_args = ["--trust-remote-code", "--chunked-prefill-size", "256"]

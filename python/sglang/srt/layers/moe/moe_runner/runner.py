@@ -40,18 +40,18 @@ class MoeRunner:
         a2a_backend_name = get_moe_a2a_backend().value
         runner_backend_name = runner_backend.value
 
-        SGLANG_CI_DISABLE_FUSED_FUNC = os.environ.get(
-            "SGLANG_CI_DISABLE_FUSED_FUNC", "0"
+        self.fused_func = FusedOpPool.get_fused_func(
+            a2a_backend_name, runner_backend_name
         )
-        if SGLANG_CI_DISABLE_FUSED_FUNC == "1":
+
+        SGLANG_CI_DISABLE_MOE_FUSED_FUNC = os.environ.get(
+            "SGLANG_CI_DISABLE_MOE_FUSED_FUNC", "0"
+        )
+        if SGLANG_CI_DISABLE_MOE_FUSED_FUNC == "1":
             logger.info(
-                "SGLANG_CI_DISABLE_FUSED_FUNC is set to 1, disabling fused func"
+                "SGLANG_CI_DISABLE_MOE_FUSED_FUNC is set to 1, disabling fused func"
             )
             self.fused_func = None
-        else:
-            self.fused_func = FusedOpPool.get_fused_func(
-                a2a_backend_name, runner_backend_name
-            )
 
     def run(
         self, dispatch_output: DispatchOutput, quant_info: MoeQuantInfo
